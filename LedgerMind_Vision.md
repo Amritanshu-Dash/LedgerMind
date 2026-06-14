@@ -70,6 +70,20 @@ It allows users to upload financial documents and ask natural language questions
 - Deploy as a public web application
 - Explore monetization or productization possibilities
 
+src/
+├── ingestion/
+│   ├── __init__.py
+│   ├── document_loader.py       # Handles file upload + text extraction
+│   ├── text_processor.py        # Cleaning + preprocessing
+│   ├── chunker.py               # Breaking text into chunks
+│   └── pipeline.py              # Main file that connects everything (1, 2, 3)
+│
+├── utils/                       # Common helper functions
+│   └── __init__.py
+│
+├── config.py                    # Configuration (paths, chunk size, etc.)
+└── main.py                      # Entry point (for testing)
+
 ---
 
 **Document Version**: 1.0  
