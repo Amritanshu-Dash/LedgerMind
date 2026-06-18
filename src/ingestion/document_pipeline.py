@@ -6,13 +6,20 @@ import re
 import time
 
 def extract_text_and_tables(pdf_path: str) -> Dict[str, Any]:
+
+    """
+    Extracts text and tables from a PDF file using pdfplumber.
+
+    Adds page markers (--- Page X ---) to help maintain document structure.
+    Tables are converted into pandas DataFrames for easier handling later.
+    """
     
     pdf_path = Path(pdf_path)
 
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
     
-    full_text = []
+    full_text = [] 
     all_tables: List[pd.DataFrame] = []
 
     try:
@@ -21,9 +28,9 @@ def extract_text_and_tables(pdf_path: str) -> Dict[str, Any]:
                 #Extract text from current page
                 page_text = page.extract_text()
                 if page_text:
-                    full_text.append(f"--- Page {page_num} ---\n{page_text}")
+                    full_text.append(f"\n\n--- Page {page_num} ---\n")
 
-                #Extract tables from current page
+                #Extract tables from current page and convert them to dataframes
                 page_tables = page.extract_tables()
                 if page_tables:
                     for table in page_tables:
@@ -52,24 +59,35 @@ def extract_text_and_tables(pdf_path: str) -> Dict[str, Any]:
 
 
 def clean_extracted_text(raw_text: str, remove_page_markers: bool = False) -> str:
+
+    """
+    Cleans and normalizes raw text extracted from PDF.
+
+    Handles hyphenated words, excessive whitespace, and optionally removes page markers.
+    """
     
     if not raw_text or not isinstance(raw_text, str):
         return ""
     
     text = raw_text
     
+    # Fix hyphenated words broken across lines (e.g., "infor- mation")
     text = re.sub(r'-\s*\n\s*', '', text)
     text = re.sub(r'-\s+', '', text)
 
+    # Remove page markers if requested
     if remove_page_markers:
         text = re.sub(r'---\s*Page\s+\d+\s*---', '', text)
 
+    # Normalise excessive newlines and spaces
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
 
+    # Strip whitespaces from each line
     lines = [line.strip() for line in text.split('\n')]
     text = '\n'.join(lines)
 
+    #Final cleanup of spaces around newlines
     text = re.sub(r' \n', '\n', text)
     text = re.sub(r'\n ', '\n', text)
 
@@ -79,6 +97,12 @@ def clean_extracted_text(raw_text: str, remove_page_markers: bool = False) -> st
 
 
 def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap:int = 200, min_chunk_size: int = 100) -> List[Dict[str, Any]]:
+
+    """
+    Splits cleaned text into overlapping chunks using a simple recursive approach.
+
+    Tries to break at paragraph or sentence level when possible to maintain context.
+    """
     
     if not text or not text.strip():
         return []
@@ -91,6 +115,8 @@ def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap:int = 200, min_c
 
     while start < text_length:
         end = start + chunk_size
+
+        # If remaining text is smaller than chunk_size, take it as the last chunk
         if end >= text_length:
             chunk = text[start:].strip()
             if len(chunk) >= min_chunk_size:
@@ -103,11 +129,13 @@ def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap:int = 200, min_c
 
         chunk = text[start:end]
 
+        # Try to break at paragraph level first
         last_para = chunk.rfind('\n\n')
         if last_para > chunk_size * 0.5:
             end = start + last_para
             chunk = text[start:end].strip()
         else:
+            # Otherwise try to break at sentence level
             last_period = chunk.rfind('. ')
             if last_period > chunk_size * 0.5:
                 end = start + last_period + 1
@@ -119,6 +147,8 @@ def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap:int = 200, min_c
                 "text": chunk,
                 "char_count": len(chunk)
             })
+
+        # Move forward with overlap
         start = end - chunk_overlap
         if start <= 0:
             start = end
@@ -128,17 +158,25 @@ def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap:int = 200, min_c
 
 def process_document(pdf_path: str, chunk_size: int = 1000, chunk_overlap: int = 200, remove_page_markers: bool = False) -> Dict[str, Any]:
 
+    """
+    Main orchestrator function that runs the full document processing pipeline.
+
+    Steps: Extract → Clean → Chunk → Return structured output with metadata and stats.
+    """
+
     start_time = time.time()
     pdf_path = Path(pdf_path)
 
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
     
-
+    # Step 1: Extract text and tables
     extraction_result = extract_text_and_tables(str(pdf_path))
 
+    # Step 2: Clean the extracted text
     cleaned_text = clean_extracted_text (extraction_result["text"], remove_page_markers=remove_page_markers)
 
+    # Step 3: Create chunks from cleaned text
     chunks = chunk_text(cleaned_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     processing_time = round(time.time() - start_time, 2)
