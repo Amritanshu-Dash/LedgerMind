@@ -28,7 +28,7 @@ def extract_text_and_tables(pdf_path: str) -> Dict[str, Any]:
                 #Extract text from current page
                 page_text = page.extract_text()
                 if page_text:
-                    full_text.append(f"\n\n--- Page {page_num} ---\n")
+                    full_text.append(f"\n\n--- Page {page_num} ---\n{page_text}")
 
                 #Extract tables from current page and convert them to dataframes
                 page_tables = page.extract_tables()

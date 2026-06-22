@@ -1,39 +1,16 @@
+import sys
 import time
 from pathlib import Path
-import sys
-from ingestion.document_reader import (
+from typing import Dict, Any
+
+# Add src folder to Python path so imports work
+sys.path.append(str(Path(__file__).parent.parent))
+
+from .document_reader import (
     extract_text_and_tables,
     clean_extracted_text,
     chunk_text
 )
-
-"""
-# Add src folder to Python path so imports work
-sys.path.append(str(Path(__file__).parent.parent))
-"""
-
-from ingestion.document_reader import extract_text_and_tables, clean_extracted_text
-
-pdf_path = "/Users/amritanshudash/Desktop/LedgerMind/EX-21.1.pdf"
-
-# Step 1: Extract raw text
-result = extract_text_and_tables(pdf_path)
-
-print("=== RAW TEXT LENGTH ===")
-print(len(result["text"]))
-
-print("\n=== RAW TEXT (first 1000 characters) ===")
-print(result["text"][:1000])
-
-print("\n=== AFTER CLEANING ===")
-cleaned = clean_extracted_text(result["text"])
-print("Cleaned text length:", len(cleaned))
-print(cleaned[:500] if cleaned else "No text after cleaning")
-
-# Get the path to src/ folder (two levels up from document_pipeline.py)
-current_file = Path(__file__).resolve()
-src_path = current_file.parent.parent          # This points to src/
-sys.path.insert(0, str(src_path))
 
 def process_document(pdf_path: str, chunk_size: int = 1000, chunk_overlap: int = 200, remove_page_markers: bool = False) -> Dict[str, Any]:
 
@@ -78,20 +55,24 @@ def process_document(pdf_path: str, chunk_size: int = 1000, chunk_overlap: int =
     }
 
 
-result = process_document(
-    pdf_path="/Users/amritanshudash/Desktop/LedgerMind/EX-21.1.pdf",
-    chunk_size=1000,
-    chunk_overlap=200
-)
+# ====================== TEMPORARY TEST CODE ======================
+# You can remove this section later when you start calling this from main.py
 
-print(result["stats"])
-print(f"Total chunks created: {len(result['chunks'])}")
+if __name__ == "__main__":
+    pdf_path = "/Users/amritanshudash/Desktop/LedgerMind/EX-21.1.pdf"
 
-# Access first chunk
-if result["chunks"]:
-    print(result["chunks"][0]["text"])
+    result = process_document(
+        pdf_path=pdf_path,
+        chunk_size=1000,
+        chunk_overlap=200
+    )
 
+    print(result["stats"])
+    print(f"\nTotal chunks created: {len(result['chunks'])}")
 
+    if result["chunks"]:
+        print("\n=== First Chunk Preview ===")
+        print(result["chunks"][0]["text"][:300])
 """
 #call 
 
