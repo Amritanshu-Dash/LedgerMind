@@ -35,6 +35,15 @@ if __name__ == "__main__":
         chunk_overlap=CHUNK_OVERLAP
     )
 
+    # ====================== DEBUG ======================
+    print("\n=== DEBUG: Checking first 3 chunks ===")
+    for i, chunk in enumerate(result["chunks"][:3]):
+        print(f"Chunk {i+1}:")
+        print(f"  page_number = {chunk.get('page_number')}")
+        print(f"  text preview: {chunk['text'][:150]}...")
+        print()
+# =================================================
+
     print("✅ Document processing complete!")
     print("=== Pipeline Stats ===")
     print(result["stats"])
@@ -76,6 +85,16 @@ if __name__ == "__main__":
     metas = results.get("metadatas", [[]])[0]
     dists = results.get("distances", [[]])[0]
 
+
+    # ====================== RAW METADATA DEBUG ======================
+    print("\n=== RAW METADATA FROM CHROMADB (first 2 results) ===")
+    raw_metas = results.get("metadatas", [[]])[0][:2]
+    for i, meta in enumerate(raw_metas):
+        print(f"Result {i+1} metadata: {meta}")
+    print("============================================================\n")
+    # ================================================================
+
+
     #Display results
     for i, (doc, metadata, distance) in enumerate(zip(docs, metas, dists)):
         #safe distance formatting
@@ -84,8 +103,10 @@ if __name__ == "__main__":
         else:
             dist_str = str(distance)
 
-        print(f"\nResult {i+1} (Distance: {dist_str})")
-        print(f"Source: {metadata.get('source', 'N/A')} | Page: {metadata.get('Page_number', 'N/A')}")
+        page = metadata.get("page_number", "N/A")
+
+        print(f"\nResult {i+1} (Distance: {dist_str}) | Page: {page}")
+        print(f"Source: {metadata.get('source', 'N/A')}")
         print("-" * 40)
-        print(doc[:600] + "..." if len(doc) > 600 else doc)
+        print(doc[:700] + "..." if len(doc) > 700 else doc)
         print()
