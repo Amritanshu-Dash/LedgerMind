@@ -62,7 +62,7 @@ class VectorStore:
         Retrieve the most relevant chunks for a given query.
         """
 
-        results = self.collection.query(query_texts=[query_text], n_results=n_results, where=filter_metadata)
+        results = self.collection.query(query_texts=[query_text], n_results=n_results, where=filter_metadata, include=["documents", "metadatas", "distances"])
         return results
     
     def get_collection_stats(self) -> Dict[str, Any]:

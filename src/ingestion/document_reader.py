@@ -96,7 +96,7 @@ def clean_extracted_text(raw_text: str, remove_page_markers: bool = False) -> st
     return text
 
 
-def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap:int = 200, min_chunk_size: int = 100) -> List[Dict[str, Any]]:
+def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap:int = 200) -> List[Dict[str, Any]]:
 
     """
     Splits cleaned text into overlapping chunks using a simple recursive approach.
@@ -107,59 +107,53 @@ def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap:int = 200, min_c
     if not text or not text.strip():
         return []
 
-    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    chunks: List[Dict[str, Any]] = []
+    page_pattern = re.compile(r'--Page\s+(\d+)\s*--')
 
-    chunks = []
-    start = 0
-    text_length = len(text)
-    current_page = 1
+    # Split text using page markers
+    parts = page_pattern.split(text)
 
-    while start < text_length:
-        end = start + chunk_size
+    page_contents = []
 
-        # If remaining text is smaller than chunk_size, take it as the last chunk
-        if end >= text_length:
-            chunk = text[start:].strip()
-            if len(chunk) >= min_chunk_size:
+    if len(parts) > 1:
+        # Page markers exist
+        for i in range(1, len(parts), 2):
+            try:
+                page_num = int(parts[i])
+                page_content = parts[i + 1] if (i + 1) < len(parts) else ""
+                if page_content.strip():
+                    page_contents.append((page_num, page_content))
+            except (ValueError, IndexError):
+                continue
+    else:
+        # No page markers found → treat everything as page 1
+        page_contents.append((1, text))
+
+    # Chunk each page separately
+    for page_num, page_text in page_contents:
+        if not page_text.strip():
+            continue
+
+        start = 0
+        text_length = len(page_text)
+
+        while start < text_length:
+            end = min(start + chunk_size, text_length)
+            chunk = page_text[start:end].strip()
+
+            if chunk:
                 chunks.append({
                     "chunk_id": len(chunks),
-                    "page_number": current_page,
+                    "page_number": page_num,
                     "text": chunk,
                     "char_count": len(chunk)
                 })
-            break
 
-        chunk = text[start:end]
+            # Move window forward with overlap
+            start += chunk_size - chunk_overlap
 
-        # Try to break at paragraph level first
-        last_para = chunk.rfind('\n\n')
-        if last_para > chunk_size * 0.5:
-            end = start + last_para
-            chunk = text[start:end].strip()
-        else:
-            # Otherwise try to break at sentence level
-            last_period = chunk.rfind('. ')
-            if last_period > chunk_size * 0.5:
-                end = start + last_period + 1
-                chunk = text[start:end].strip()
-        
-        if len(chunk) >= min_chunk_size:
-            chunks.append({
-                "chunk_id": len(chunks),
-                "page_number": current_page,
-                "text": chunk,
-                "char_count": len(chunk)
-            })
+            if start >= text_length:
+                break
 
-        # Update current page if we passed a page marker
-        page_markers = list(re.finditer(r'--- Page (\d+) ---', text[start:end]))
-        if page_markers:
-            current_page = int(page_markers[-1].group(1))
-
-        # Move forward with overlap
-        start = end - chunk_overlap
-        if start <= 0:
-            start = end
-        
     return chunks
 
