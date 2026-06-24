@@ -9,24 +9,30 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 class VectorStore:
-    def __init__( self, persist_directory: str = "vector_db", collection_name: str = "documents", embdding_model: str = "all-MiniLM-L6-v2"):
+    def __init__( self, persist_directory: str = "vector_db", collection_name: str = "documents"):
         """
         Initialize ChromaDB client and collection.
         Uses sentence-transformers for local embeddings (free & good quality).
         """
-        self.persist_directory = Path(persist_directory)
-        self.persist_directory.mkdir(parents=True, exist_ok=True)
+        self.persist_directory = persist_directory
+        self.client = chromadb.PersistentClient(path=persist_directory)
 
-        # initialise chromdb with persistence
-        self.client = chromadb.PersistentClient(path=str(self.persist_directory))
+        #Use sentence transformers embedding
+        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
 
-        # Use sentence-transformers embedding functions
-        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=embdding_model)
+        # Safe way to get/create collection 9avoids embedding function conflict
 
-        #Get or create collections
-        self.collection = self.client.get_or_create_collection(name=collection_name, embedding_function=self.embedding_function, metadata={"hnsw:space": "cosine"}) #Use cosine similarity
-
-        print(f"✅ Vector store initialized. Collection: '{collection_name}'")
+        try:
+            self.collection = self.client.get_collection(name=collection_name)
+            print(f"✅ Vector store initialized. Collection: '{collection_name}'")
+        except Exception:
+            #collection doesn't exist yet, create it
+            self.collection = self.client.create_collection(
+                name=self.collection_name,
+                embedding_function=self.embedding_function,
+                metadata={"hnsw:space": "cosine"}
+            )
+            print(f"✅ Created new collection: '{collection_name}'")
 
 
     def add_chunks(self, chunks: List[Dict[str, Any]], source_filename: str) -> None:
@@ -93,8 +99,16 @@ class VectorStore:
     def reset_collection(self) -> None:
         """Completely reset the collection (deletes all data). Use with caution."""
         collection_name = self.collection.name
-        self.client.delete_collection(name=collection_name)
-        self.collection = self.client.create_collection(name=collection_name)
+        try:
+            self.client.delete_collection(name=collection_name)
+        except Exception:
+            pass
+        #Recreate collection
+        self.collection = self.client.create_collection(
+            name=collection_name,
+            embedding_function=self.embedding_function,
+            metadata={"hnsw:space": "cosine"}
+        )
         print(f"⚠️ Collection '{collection_name}' has been fully reset.")
 
 
@@ -125,7 +139,24 @@ class VectorStore:
             return {"exists": False, "error": str(e), "healthy": False}
 
 
+    def list_documents(self) -> list:    
+        """
+            Return a list of all unique source filenames currently stored in the vector database.
+        """
+        try:
+            results = self.collection.get()
+            sources = set()
+
+            for meta in results.get("metadatas", []):
+                if meta and "source" in meta:
+                    sources.add(meta["source"])
             
+            return sorted(list(sources))
+
+        except Exception as e:
+            print(f"Error while listing documents: {e}")
+            return []
+
 
 # ====================== Quick Test ======================
 
