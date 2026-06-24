@@ -73,6 +73,59 @@ class VectorStore:
             "total_chunks": count,
             "persist_directory": str(self.persist_directory)
         }
+    
+    def delete_document(self, source_filename: str) -> int:
+        """Delete all chunks belonging to a specific source file. Returns number of deleted chunks."""
+        try:
+            existing = self.collection.get(where={"source": source_filename})
+            count = len(existing["ids"]) if existing.get("ids") else 0
+
+            if count > 0:
+                self.collection.delete(where={"source": source_filename})
+                print(f"🧹 Deleted {count} old chunks for '{source_filename}'")
+            return count
+        
+        except Exception as e:
+            print(f"Warning: Could not delete document - {e}")
+            return 0
+        
+    
+    def reset_collection(self) -> None:
+        """Completely reset the collection (deletes all data). Use with caution."""
+        collection_name = self.collection.name
+        self.client.delete_collection(name=collection_name)
+        self.collection = self.client.create_collection(name=collection_name)
+        print(f"⚠️ Collection '{collection_name}' has been fully reset.")
+
+
+    def get_document_info(self, source_filename: str) -> dict:
+        """Check whether a document exists and has complete metadata (especially page_number)."""
+        try:
+            results = self.collection.get(where={"source": source_filename})
+            ids = results.get("ids", [])
+
+            if not ids:
+                return {"exists": False, "chunk_count": 0, "healthy": False}
+
+            metas = results.get("metadatas", []) or []
+
+            # Robust check: page_number must exist and be a positive integer
+            has_valid_page = all(
+                isinstance(m.get("page_number"), int) and m.get("page_number") > 0
+                for m in metas
+            ) if metas else False
+
+            return {
+                "exists": True,
+                "chunk_count": len(ids),
+                "has_page_number": has_valid_page,
+                "healthy": has_valid_page
+            }
+        except Exception as e:
+            return {"exists": False, "error": str(e), "healthy": False}
+
+
+            
 
 # ====================== Quick Test ======================
 
