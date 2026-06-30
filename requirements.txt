@@ -5,3 +5,8 @@ typing
 install 
 chromadb 
 sentence-transformers
+sec-edgar-downloader
+beautifulsoup4 
+html2text 
+lxml
+langchain_core
