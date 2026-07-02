@@ -6,7 +6,6 @@ Handles .txt filings downloaded from SEC EDGAR (Inline XBRL format)
 import re
 from typing import List, Dict, Any, Optional
 from pathlib import Path
-
 from bs4 import BeautifulSoup
 import html2text
 from langchain_core.documents import Document
@@ -48,7 +47,7 @@ def extract_sec_header_metadata(content: str) -> Dict[str, Any]:
     if filed_match:
         metadata["filed_as_of_date"] = filed_match.group(1).strip()
 
-    # Accession number
+    # Accession number from header (fallback)
     acc_match = re.search(r"ACCESSION NUMBER:\s+(.+)", content)
     if acc_match:
         metadata["accession_number"] = acc_match.group(1).strip()
@@ -56,41 +55,57 @@ def extract_sec_header_metadata(content: str) -> Dict[str, Any]:
     return metadata
 
 
-def extract_main_document_text(content: str) -> Optional[str]:
-    """
-    Find the main 10-K / 10-Q document block (not exhibits).
-    Looks for the block that has <TYPE>10-K or <TYPE>10-Q.
-    """
-    # Find all DOCUMENT blocks
-    doc_blocks = re.findall(r"<DOCUMENT>(.*?)</DOCUMENT>", content, re.DOTALL)
+def extract_ticker_from_path(file_path: Path) -> Optional[str]:
+    """Extract ticker from folder structure (e.g., .../AAPL/10-K/...)."""
+    parts = file_path.parts
+    for i, part in enumerate(parts):
+        if part.upper() in ["10-K", "10-Q", "10K", "10Q"]:
+            if i > 0:
+                return parts[i - 1].upper()
+    return None
 
+
+def extract_accession_from_path(file_path: Path) -> Optional[str]:
+    """Extract accession number from the parent folder name."""
+    parent_name = file_path.parent.name
+    # Typical format: 0000320193-24-000123
+    if re.match(r"\d{10}-\d{2}-\d{6}", parent_name):
+        return parent_name
+    return None
+
+
+def extract_main_document_text(content: str) -> Optional[str]:
+    """Find the main 10-K / 10-Q document block (not exhibits)."""
+    doc_blocks = re.findall(r"<DOCUMENT>(.*?)</DOCUMENT>", content, re.DOTALL)
     for block in doc_blocks:
-        # Check if this block is the main filing (10-K or 10-Q)
         type_match = re.search(r"<TYPE>(10-K|10-Q)", block, re.IGNORECASE)
         if type_match:
             text_match = re.search(r"<TEXT>(.*?)</TEXT>", block, re.DOTALL)
             if text_match:
                 return text_match.group(1).strip()
 
-    # Fallback: if nothing found, try the first block anyway
+    # Fallback
     if doc_blocks:
         text_match = re.search(r"<TEXT>(.*?)</TEXT>", doc_blocks[0], re.DOTALL)
         if text_match:
             return text_match.group(1).strip()
-
     return None
 
-def clean_and_convert_to_text(html_content: str) -> str:
-    """
-    Convert HTML + Inline XBRL to clean text.
-    Less aggressive cleaning so we don't lose content.
-    """
-    # Only remove the outer XBRL wrapper if it exists, keep inner HTML
-    html_content = re.sub(r"</?XBRL>", "", html_content, flags=re.IGNORECASE)
 
+def clean_and_convert_to_text(html_content: str) -> str:
+    """Strong cleaning for Inline XBRL filings."""
     soup = BeautifulSoup(html_content, "lxml")
 
-    # Remove only script/style
+    # Remove hidden XBRL divs
+    for hidden_div in soup.find_all("div", style=lambda x: x and "display:none" in x):
+        hidden_div.decompose()
+
+    # Remove inline XBRL tags
+    for tag in soup.find_all(True):
+        if tag.name and (tag.name.startswith("ix:") or tag.name.startswith("xbrli:")):
+            tag.decompose()
+
+    # Remove script/style/noscript
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
@@ -108,7 +123,6 @@ def clean_and_convert_to_text(html_content: str) -> str:
 def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[str]:
     """Simple paragraph-aware chunking."""
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-
     chunks = []
     current_chunk = ""
 
@@ -138,6 +152,7 @@ def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[st
 def process_sec_filing(file_path: str) -> List[Document]:
     """Main function to process an SEC EDGAR .txt filing."""
     file_path = Path(file_path)
+
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -147,6 +162,17 @@ def process_sec_filing(file_path: str) -> List[Document]:
         content = f.read()
 
     header_metadata = extract_sec_header_metadata(content)
+
+    # Prefer accession number from folder path (more reliable)
+    accession_from_path = extract_accession_from_path(file_path)
+    if accession_from_path:
+        header_metadata["accession_number"] = accession_from_path
+
+    # Extract ticker from folder structure
+    ticker = extract_ticker_from_path(file_path)
+    if ticker:
+        header_metadata["ticker"] = ticker
+
     main_text = extract_main_document_text(content)
 
     if not main_text:
@@ -171,6 +197,7 @@ def process_sec_filing(file_path: str) -> List[Document]:
                 "chunk_index": i,
                 "total_chunks": len(text_chunks),
                 "company_name": header_metadata.get("company_name"),
+                "ticker": header_metadata.get("ticker"),
                 "cik": header_metadata.get("cik"),
                 "filing_type": header_metadata.get("filing_type"),
                 "period_of_report": header_metadata.get("period_of_report"),

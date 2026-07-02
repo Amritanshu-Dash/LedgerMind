@@ -1,146 +1,180 @@
 """
 run.py
 One-click runner for the full document ingestion pipeline.
-It extracts, chunks, embeds, and stores documents in ChromaDB.
+Supports both PDF files and SEC EDGAR .txt filings.
 """
 
 import argparse
 import sys
 from pathlib import Path
+from typing import List, Dict, Any
 
 # ====================== PATH FIX ======================
-# This allows us to import from src/ingestion/
 sys.path.append(str(Path(__file__).parent / "src"))
 # ====================================================
 
-from ingestion.document_pipeline import process_document
+from ingestion.pdf_processor import process_pdf
+from ingestion.sec_filing_processor import process_sec_filing
 from ingestion.vector_store import VectorStore
 
-
 # ====================== CONFIG ======================
-PDF_PATH = "/Users/amritanshudash/Desktop/LedgerMind/EX-21.1.pdf"
 PERSIST_DIRECTORY = "vector_db"
 COLLECTION_NAME = "ledgermind_docs"
 # ===================================================
 
+def resolve_file_paths(input_paths: List[str]) -> List[Path]:
+    """
+    Recursively find all supported files (.pdf and .txt) from given paths.
+    Shows organized output grouped by folder.
+    """
+    from collections import defaultdict
 
-def resolve_pdf_paths(input_paths):
-    """Convert input (files or directory) into a clean list of PDF paths."""
-    pdf_files = []
+    supported_files = []
+    files_by_folder = defaultdict(list)
+
     for path_str in input_paths:
         path = Path(path_str)
+
         if path.is_dir():
-            found = sorted(path.glob("*.pdf"))
-            pdf_files.extend(found)
-            print(f"📁 Found {len(found)} PDF(s) in folder: {path}")
-        elif path.is_file() and path.suffix.lower() == ".pdf":
-            pdf_files.append(path)
+            # Recursive search for .pdf and .txt
+            found = sorted(list(path.rglob("*.pdf")) + list(path.rglob("*.txt")))
+            supported_files.extend(found)
+
+            # Group files by their parent folder for nice logging
+            for f in found:
+                folder_key = str(f.parent.relative_to(path) if f.parent != path else ".")
+                files_by_folder[folder_key].append(f.name)
+
+        elif path.is_file() and path.suffix.lower() in [".pdf", ".txt"]:
+            supported_files.append(path)
+            files_by_folder[str(path.parent)] = [path.name]
         else:
             print(f"⚠️ Skipping invalid path: {path}")
-    return pdf_files
 
+    # Pretty print what was found
+    if files_by_folder:
+        print("\n📁 Found files:")
+        for folder, files in files_by_folder.items():
+            print(f"   📂 {folder}/")
+            for fname in files:
+                print(f"      └── {fname}")
+        print(f"\nTotal: {len(supported_files)} file(s) found\n")
 
+    return supported_files
 
+def process_file(file_path: Path) -> Dict[str, Any]:
+    """
+    Unified processor that routes to correct handler based on file type.
+    Returns a dict with 'chunks' key for compatibility with VectorStore.
+    """
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".pdf":
+        result = process_pdf(str(file_path))
+        return result #Already has 'chunks key
+    
+    elif suffix == ".txt":
+        # process_sec_filing returns List[Document]
+        documents = process_sec_filing(str(file_path))
+        if not documents:
+            return {"chunks": []}
+        
+        #Convert LangChain Documents to simple chunk format
+        chunks = []
+        for doc in documents:
+            chunks.append({
+                "text": doc.page_content,
+                "metadata": doc.metadata
+            })
+        
+        return {"chunks": chunks}
+    
+    else:
+        raise ValueError(f"Unsupported file type: {suffix}")
+    
 def main():
+    parser = argparse.ArgumentParser(description="LedgerMind Ingestion Pipeline (PDF + SEC TXT)")
+    parser.add_argument("paths", nargs="*", help="PDF or TXT file(s) or a folder containing them")
+    parser.add_argument("--check", nargs="*", default=False, help="Check health of documents")
+    parser.add_argument("--reset", nargs="*", default=False, help="Reset and optionally re-ingest")
 
-    parser = argparse.ArgumentParser(description="LedgerMind Ingestion Pipeline")
-    parser.add_argument("paths", nargs = "*", help = "PDF file(s) or a folder containing PDFs")
-    parser.add_argument("--check", nargs = "*", default = False, help = "Check health of documents. Can take files/folder or nothing for global check")
-    parser.add_argument("--reset", nargs = "*", default = False, help="Reset and optionally re-ingest specific files/folder")
     args = parser.parse_args()
-
     vector_store = VectorStore(persist_directory=PERSIST_DIRECTORY, collection_name=COLLECTION_NAME)
 
     # ====================== RESET MODE ======================
-
     if args.reset is not False:
-
         print("⚠️ RESET MODE ACTIVATED")
         vector_store.reset_collection()
 
-        if args.reset: # User provided path
-            pdf_files = resolve_pdf_paths(args.reset)
-            for pdf_path in pdf_files:
-                print(f"Re-ingesting: {pdf_path.name}")
-                result = process_document(str(pdf_path))
-                vector_store.add_chunks(chunks=result["chunks"], source_filename=pdf_path.name)
-
+        if args.reset:
+            files = resolve_file_paths(args.reset)
+            for file_path in files:
+                print(f"Re-ingesting: {file_path.name}")
+                result = process_file(file_path)
+                vector_store.add_chunks(chunks=result["chunks"], source_filename=file_path.name)
         else:
-            print("No PDF provided. Collection has been reset but nothing was re-ingested.")
-        
+            print("Collection has been reset but nothing was re-ingested.")
         return
 
     # ====================== CHECK MODE ======================
     if args.check is not False:
-
         print("🔍 CHECK MODE: Analyzing database health...\n")
-
         if not args.check:
-            #Global check - show all docs
             documents = vector_store.list_documents()
             if not documents:
                 print("No documents found in the vector database.")
                 return
-            
-            print(f"Found {len(documents)} document(s) in the database:\n")
-
             for idx, source in enumerate(documents, 1):
                 info = vector_store.get_document_info(source)
                 status = "✅ Healthy" if info.get("healthy") else "⚠️ Needs Re-ingestion"
                 print(f"{idx}. {source}")
-                print(f"   Chunks: {info.get('chunk_count', 0)} | Page Numbers: {info.get('has_page_number')} | Status: {status}\n")
-        
+                print(f"   Chunks: {info.get('chunk_count', 0)} | Status: {status}\n")
         else:
-            #Specific document check
-            pdf_files = resolve_pdf_paths(args.check)
-            for pdf_path in pdf_files:
-                source = pdf_path.name
-                info = vector_store.get_document_info(source)
+            files = resolve_file_paths(args.check)
+            for file_path in files:
+                info = vector_store.get_document_info(file_path.name)
                 status = "✅ Healthy" if info.get("healthy") else "⚠️ Needs Re-ingestion"
-                print(f"📄 {source}")
-                print(f"   Exists: {info.get('exists')} | Chunks: {info.get('chunk_count', 0)} | Healthy: {status}\n")
-            
-        return 
+                print(f"📄 {file_path.name} | Chunks: {info.get('chunk_count', 0)} | Status: {status}")
+        return
 
-
-    
     # ====================== DEFAULT SMART MODE ======================
-
     if not args.paths:
-        print("Error: Please provide a PDF file or a folder containing PDFs.")
+        print("Error: Please provide PDF or TXT file(s) or a folder.")
         print("Examples:")
-        print("  python run.py data/                    # Ingest all PDFs from data folder")
-        print("  python run.py data/EX-21.1.pdf         # Ingest single PDF")
-        print("  python run.py data/file1.pdf data/file2.pdf")
+        print("  python run.py data/                    # All PDFs + TXTs from folder")
+        print("  python run.py data/EX-21.1.pdf         # Single PDF")
+        print("  python run.py data/AAPL_10K.txt        # Single SEC filing")
         return
 
-    pdf_files = resolve_pdf_paths(args.paths)
-
-    if not pdf_files:
-        print("No valid PDF files found.")
+    files = resolve_file_paths(args.paths)
+    if not files:
+        print("No valid .pdf or .txt files found.")
         return
-    
-    print(f"\n🚀 Starting LedgerMind Pipeline for {len(pdf_files)} PDF(s)...\n")
 
-    for pdf_path in pdf_files:
-        source_filename = pdf_path.name
+    print(f"\n🚀 Starting LedgerMind Pipeline for {len(files)} file(s)...\n")
+
+    for file_path in files:
+        source_filename = file_path.name
         print(f"--- Processing: {source_filename} ---")
-        info = vector_store.get_document_info(source_filename)
 
+        info = vector_store.get_document_info(source_filename)
         if info.get("healthy"):
             print(f"✅ Already healthy in DB. Skipping ingestion.\n")
-        
-        else:
-            print(f"⚠️ Missing or unhealthy. Re-ingesting...\n")
-            vector_store.delete_document(source_filename)
-            result = process_document(str(pdf_path))
+            continue
+
+        print(f"⚠️ Missing or unhealthy. Re-ingesting...\n")
+        vector_store.delete_document(source_filename)
+
+        result = process_file(file_path)
+        if result["chunks"]:
             vector_store.add_chunks(chunks=result["chunks"], source_filename=source_filename)
-            print(f"✅ Ingestion completed for {source_filename}\n")
+            print(f"✅ Ingestion completed for {source_filename} ({len(result['chunks'])} chunks)\n")
+        else:
+            print(f"⚠️ No chunks extracted from {source_filename}. Skipping.\n")
 
     print("🎉 All done!")
 
 
 if __name__ == "__main__":
-    main()
-
-
+    main()   
