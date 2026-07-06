@@ -15,8 +15,8 @@ from collections import defaultdict
 sys.path.append(str(Path(__file__).parent / "src"))
 # ====================================================
 
-from ingestion.pdf_processor import process_pdf
-from ingestion.sec_filing_processor import process_sec_filing
+from ingestion.pdf_file_ingestion import process_pdf
+from ingestion.txt_file_ingestion import process_sec_filing
 from ingestion.vector_store import VectorStore
 
 # ====================== CONFIG ======================
