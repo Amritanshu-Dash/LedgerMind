@@ -1,223 +1,206 @@
 """
-SEC EDGAR Text Filing Processor
-Handles .txt filings downloaded from SEC EDGAR (Inline XBRL format)
+TXT / Markdown File Ingestion Module
+====================================
+Handles plain text files (.txt) and Markdown files (.md).
+Clean, robust, and consistent with PDF ingestion module.
 """
 
+import logging
 import re
-from typing import List, Dict, Any, Optional
+import time
 from pathlib import Path
-from bs4 import BeautifulSoup
-import html2text
-from langchain_core.documents import Document
+from typing import Any, Dict, List
+
+# ============================================================
+#                        LOGGING
+# ============================================================
+
+logger = logging.getLogger(__name__)
 
 
-def extract_sec_header_metadata(content: str) -> Dict[str, Any]:
-    """Extract useful metadata from SEC-HEADER section."""
-    metadata = {
-        "company_name": None,
-        "cik": None,
-        "filing_type": None,
-        "period_of_report": None,
-        "filed_as_of_date": None,
-        "accession_number": None,
-    }
+# ============================================================
+#                    VALIDATION & HELPERS
+# ============================================================
 
-    # Company name
-    company_match = re.search(r"COMPANY CONFORMED NAME:\s+(.+)", content)
-    if company_match:
-        metadata["company_name"] = company_match.group(1).strip()
-
-    # CIK
-    cik_match = re.search(r"CENTRAL INDEX KEY:\s+(\d+)", content)
-    if cik_match:
-        metadata["cik"] = cik_match.group(1).strip()
-
-    # Filing type
-    form_match = re.search(r"CONFORMED SUBMISSION TYPE:\s+(.+)", content)
-    if form_match:
-        metadata["filing_type"] = form_match.group(1).strip()
-
-    # Period of report
-    period_match = re.search(r"CONFORMED PERIOD OF REPORT:\s+(\d+)", content)
-    if period_match:
-        metadata["period_of_report"] = period_match.group(1).strip()
-
-    # Filed as of date
-    filed_match = re.search(r"FILED AS OF DATE:\s+(\d+)", content)
-    if filed_match:
-        metadata["filed_as_of_date"] = filed_match.group(1).strip()
-
-    # Accession number from header (fallback)
-    acc_match = re.search(r"ACCESSION NUMBER:\s+(.+)", content)
-    if acc_match:
-        metadata["accession_number"] = acc_match.group(1).strip()
-
-    return metadata
+def _validate_chunk_parameters(chunk_size: int, chunk_overlap: int) -> None:
+    """Validate chunking parameters."""
+    if not isinstance(chunk_size, int) or chunk_size <= 0:
+        raise ValueError(f"chunk_size must be a positive integer, got {chunk_size}")
+    if not isinstance(chunk_overlap, int) or chunk_overlap < 0:
+        raise ValueError(f"chunk_overlap must be a non-negative integer, got {chunk_overlap}")
+    if chunk_overlap >= chunk_size:
+        raise ValueError(
+            f"chunk_overlap ({chunk_overlap}) must be smaller than chunk_size ({chunk_size})"
+        )
 
 
-def extract_ticker_from_path(file_path: Path) -> Optional[str]:
-    """Extract ticker from folder structure (e.g., .../AAPL/10-K/...)."""
-    parts = file_path.parts
-    for i, part in enumerate(parts):
-        if part.upper() in ["10-K", "10-Q", "10K", "10Q"]:
-            if i > 0:
-                return parts[i - 1].upper()
-    return None
+def _is_valid_text_file(file_path: Path) -> bool:
+    """Check if the file is a supported text file (.txt or .md)."""
+    return file_path.is_file() and file_path.suffix.lower() in [".txt", ".md"]
 
 
-def extract_accession_from_path(file_path: Path) -> Optional[str]:
-    """Extract accession number from the parent folder name."""
-    parent_name = file_path.parent.name
-    # Typical format: 0000320193-24-000123
-    if re.match(r"\d{10}-\d{2}-\d{6}", parent_name):
-        return parent_name
-    return None
+def _read_file_with_encoding(file_path: Path) -> str:
+    """Try to read file with UTF-8, fallback to latin-1 if needed."""
+    try:
+        return file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        logger.warning(f"UTF-8 decoding failed for {file_path.name}. Trying latin-1...")
+        return file_path.read_text(encoding="latin-1")
 
 
-def extract_main_document_text(content: str) -> Optional[str]:
-    """Find the main 10-K / 10-Q document block (not exhibits)."""
-    doc_blocks = re.findall(r"<DOCUMENT>(.*?)</DOCUMENT>", content, re.DOTALL)
-    for block in doc_blocks:
-        type_match = re.search(r"<TYPE>(10-K|10-Q)", block, re.IGNORECASE)
-        if type_match:
-            text_match = re.search(r"<TEXT>(.*?)</TEXT>", block, re.DOTALL)
-            if text_match:
-                return text_match.group(1).strip()
+# ============================================================
+#                    TEXT CLEANING
+# ============================================================
 
-    # Fallback
-    if doc_blocks:
-        text_match = re.search(r"<TEXT>(.*?)</TEXT>", doc_blocks[0], re.DOTALL)
-        if text_match:
-            return text_match.group(1).strip()
-    return None
+def clean_text(raw_text: str) -> str:
+    """
+    Clean and normalize text content.
+    Removes excessive whitespace, fixes hyphenation, etc.
+    """
+    if not raw_text or not isinstance(raw_text, str):
+        return ""
 
+    text = raw_text
 
-def clean_and_convert_to_text(html_content: str) -> str:
-    """Strong cleaning for Inline XBRL filings."""
-    soup = BeautifulSoup(html_content, "lxml")
+    # Fix hyphenated words broken across lines
+    text = re.sub(r'-\s*\n\s*', '', text)
+    text = re.sub(r'-\s+', '', text)
 
-    # Remove hidden XBRL divs
-    for hidden_div in soup.find_all("div", style=lambda x: x and "display:none" in x):
-        hidden_div.decompose()
+    # Normalize whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[ \t]+', ' ', text)
 
-    # Remove inline XBRL tags
-    for tag in soup.find_all(True):
-        if tag.name and (tag.name.startswith("ix:") or tag.name.startswith("xbrli:")):
-            tag.decompose()
+    # Clean lines
+    lines = [line.strip() for line in text.split('\n')]
+    text = '\n'.join(lines)
+    text = re.sub(r' \n', '\n', text)
+    text = re.sub(r'\n ', '\n', text)
 
-    # Remove script/style/noscript
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-
-    h = html2text.HTML2Text()
-    h.ignore_links = True
-    h.ignore_images = True
-    h.body_width = 0
-    h.single_line_break = True
-
-    text = h.handle(str(soup))
-    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[str]:
-    """Simple paragraph-aware chunking."""
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    chunks = []
-    current_chunk = ""
+# ============================================================
+#                    CHUNKING
+# ============================================================
 
-    for para in paragraphs:
-        if len(current_chunk) + len(para) + 2 <= chunk_size:
-            current_chunk += para + "\n\n"
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = para + "\n\n"
-
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-
-    final_chunks = []
-    for i, chunk in enumerate(chunks):
-        if i == 0:
-            final_chunks.append(chunk)
-        else:
-            prev = chunks[i - 1]
-            overlap_text = prev[-overlap:] if len(prev) > overlap else prev
-            final_chunks.append(overlap_text + "\n\n" + chunk)
-
-    return final_chunks
-
-
-def process_sec_filing(file_path: str) -> List[Document]:
-    """Main function to process an SEC EDGAR .txt filing."""
-    file_path = Path(file_path)
-
-    if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    print(f"Processing SEC filing: {file_path.name}")
-
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
-
-    header_metadata = extract_sec_header_metadata(content)
-
-    # Prefer accession number from folder path (more reliable)
-    accession_from_path = extract_accession_from_path(file_path)
-    if accession_from_path:
-        header_metadata["accession_number"] = accession_from_path
-
-    # Extract ticker from folder structure
-    ticker = extract_ticker_from_path(file_path)
-    if ticker:
-        header_metadata["ticker"] = ticker
-
-    main_text = extract_main_document_text(content)
-
-    if not main_text:
-        print(f"Warning: Could not extract main document from {file_path.name}")
+def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Dict[str, Any]]:
+    """
+    Split text into overlapping chunks.
+    """
+    if not text or not text.strip():
         return []
 
-    clean_text = clean_and_convert_to_text(main_text)
+    _validate_chunk_parameters(chunk_size, chunk_overlap)
 
-    if not clean_text or len(clean_text) < 500:
-        print(f"Warning: Very little readable text extracted from {file_path.name}")
-        return []
+    chunks: List[Dict[str, Any]] = []
+    text_length = len(text)
+    start = 0
 
-    text_chunks = chunk_text(clean_text, chunk_size=1500, overlap=200)
+    while start < text_length:
+        end = min(start + chunk_size, text_length)
+        chunk = text[start:end].strip()
 
-    documents = []
-    for i, chunk in enumerate(text_chunks):
-        doc = Document(
-            page_content=chunk,
-            metadata={
-                "source": str(file_path),
-                "file_name": file_path.name,
-                "chunk_index": i,
-                "total_chunks": len(text_chunks),
-                "company_name": header_metadata.get("company_name"),
-                "ticker": header_metadata.get("ticker"),
-                "cik": header_metadata.get("cik"),
-                "filing_type": header_metadata.get("filing_type"),
-                "period_of_report": header_metadata.get("period_of_report"),
-                "filed_as_of_date": header_metadata.get("filed_as_of_date"),
-                "accession_number": header_metadata.get("accession_number"),
-                "doc_type": "sec_filing",
-            }
+        if chunk:
+            chunks.append({
+                "chunk_id": len(chunks),
+                "page_number": 1,           # TXT/MD files don't have real pages
+                "text": chunk,
+                "char_count": len(chunk),
+            })
+
+        start += chunk_size - chunk_overlap
+        if start >= text_length:
+            break
+
+    return chunks
+
+
+# ============================================================
+#                    MAIN PROCESSING FUNCTION
+# ============================================================
+
+def process_txt(
+    file_path: str,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200
+) -> Dict[str, Any]:
+    """
+    Main function to process a .txt or .md file end-to-end.
+    """
+    start_time = time.time()
+    file_path_obj = Path(file_path)
+
+    # Validate parameters first
+    _validate_chunk_parameters(chunk_size, chunk_overlap)
+
+    logger.info(f"Starting TXT/MD processing: {file_path_obj.name}")
+
+    if not _is_valid_text_file(file_path_obj):
+        raise FileNotFoundError(
+            f"File not found or unsupported format (only .txt and .md allowed): {file_path}"
         )
-        documents.append(doc)
 
-    print(f"Extracted {len(documents)} chunks from {file_path.name}")
-    return documents
+    try:
+        # Step 1: Read file
+        raw_text = _read_file_with_encoding(file_path_obj)
 
+        if not raw_text.strip():
+            logger.warning(f"File is empty: {file_path_obj.name}")
+            return {
+                "file_info": {
+                    "filename": file_path_obj.name,
+                    "file_path": str(file_path_obj),
+                    "file_type": file_path_obj.suffix.lower(),
+                },
+                "processing": {
+                    "chunk_size": chunk_size,
+                    "chunk_overlap": chunk_overlap,
+                    "total_chunks_created": 0,
+                    "processing_time_seconds": 0,
+                },
+                "chunks": [],
+                "stats": {
+                    "total_chunks": 0,
+                    "processing_time_seconds": 0,
+                    "has_text_content": False,
+                }
+            }
 
-if __name__ == "__main__":
-    # Quick test
-    test_file = "/Users/amritanshudash/Desktop/LedgerMind/data/raw/sec-edgar-filings/AAPL/10-K/0000320193-24-000123/full-submission.txt"
-    docs = process_sec_filing(test_file)
-    if docs:
-        print("\n=== Sample Chunk 1 ===")
-        print(docs[0].page_content[:1500])
-        print("\n=== Metadata ===")
-        print(docs[0].metadata)
+        # Step 2: Clean text
+        cleaned_text = clean_text(raw_text)
+
+        # Step 3: Chunk text
+        chunks = chunk_text(cleaned_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+        processing_time = round(time.time() - start_time, 2)
+
+        result = {
+            "file_info": {
+                "filename": file_path_obj.name,
+                "file_path": str(file_path_obj),
+                "file_type": file_path_obj.suffix.lower(),
+            },
+            "processing": {
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "total_chunks_created": len(chunks),
+                "processing_time_seconds": processing_time,
+            },
+            "chunks": chunks,
+            "stats": {
+                "total_chunks": len(chunks),
+                "processing_time_seconds": processing_time,
+                "has_text_content": len(cleaned_text) > 0,
+            }
+        }
+
+        logger.info(
+            f"Finished processing '{file_path_obj.name}' → "
+            f"{len(chunks)} chunks | {processing_time}s"
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to process file '{file_path_obj.name}': {str(e)}")
+        raise
