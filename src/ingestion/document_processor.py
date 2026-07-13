@@ -10,13 +10,17 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from chromadb import logger
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 #Import our existing ingestion modules
 from .pdf_ingestion_module.pdf_ingestion import process_pdf
 from .txt_md_ingestion_module.txt_md_ingestion import process_txt
-
-logger - logging.getLogger(__name__)
 
 def get_file_type(file_path : str) -> str:
     """Detect file type based on extension."""
@@ -75,7 +79,7 @@ def  process_document(file_path: str,
 
         logger.info(
             f"Successfully processed '{file_path_obj.name}' "
-            f"({file_type}) in {total_time}s"
+            f"({file_type}) in {total_time}s | Chunks: {result['stats']['total_chunks']}"
         )
 
         return result
@@ -85,14 +89,41 @@ def  process_document(file_path: str,
         raise
 
 
-# Optional: Quick test function
+# ============================================================
+#                      TESTING SECTION
+# ============================================================
 if __name__ == "__main__":
-    # Example usage
+    # ============ UPDATE THESE PATHS ============
     test_pdf = "/Users/amritanshudash/Desktop/LedgerMind/data/EX-21.1.pdf"
-    test_txt = "/path/to/your/test.txt"
+    test_txt = "/Users/amritanshudash/Desktop/LedgerMind/data/raw/sec-edgar-filings/AAPL/10-K/0000320193-24-000123/full-submission.txt"   # ← Change this to a real .txt or .md file
+    # ============================================
 
+    print("\n" + "="*60)
+    print("TESTING DOCUMENT PROCESSOR")
+    print("="*60)
+
+    # ---------- Test PDF ----------
+    print("\n1. Testing PDF file...")
     try:
-        result = process_document(test_pdf)
-        print(f"PDF processed successfully. Chunks: {result['stats']['total_chunks']}")
+        result = process_document(test_pdf, chunk_size=1000, chunk_overlap=200)
+        print(f"✅ PDF Success!")
+        print(f"   File      : {result['file_info']['filename']}")
+        print(f"   Chunks    : {result['stats']['total_chunks']}")
+        print(f"   Time      : {result['pipeline_info']['total_pipeline_time_seconds']}s")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ PDF Failed: {e}")
+
+    # ---------- Test TXT ----------
+    print("\n2. Testing TXT/MD file...")
+    try:
+        result = process_document(test_txt, chunk_size=1000, chunk_overlap=200)
+        print(f"✅ TXT Success!")
+        print(f"   File      : {result['file_info']['filename']}")
+        print(f"   Chunks    : {result['stats']['total_chunks']}")
+        print(f"   Time      : {result['pipeline_info']['total_pipeline_time_seconds']}s")
+    except Exception as e:
+        print(f"❌ TXT Failed: {e}")
+
+    print("\n" + "="*60)
+    print("Testing completed.")
+    print("="*60)
