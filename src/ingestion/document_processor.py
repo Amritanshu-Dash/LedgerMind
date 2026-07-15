@@ -8,7 +8,7 @@ This acts as the main entry point for document ingestion in LedgerMind.
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 from .pdf_ingestion_module.pdf_ingestion import process_pdf
 from .txt_md_ingestion_module.txt_md_ingestion import process_txt
 
+# Import ChromaDB store
+from database.chroma_store import ChromaStore
+
 def get_file_type(file_path : str) -> str:
     """Detect file type based on extension."""
     ext =   Path(file_path).suffix.lower()
@@ -32,15 +35,15 @@ def get_file_type(file_path : str) -> str:
     else:
         return "unsupported"
     
-def  process_document(file_path: str,
+def process_document(
+    file_path: str,
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
-    remove_page_markers: bool = False
+    remove_page_markers: bool = False,
+    store_in_db: bool = True,
 ) -> Dict[str, Any]:
     """
-    Unified function to process any supported document (PDF or TXT/MD).
-    
-    This is the main function you should use for document ingestion.
+    Unified function to process any supported document and optionally store in ChromaDB.
     """
 
     start_time = time.time()
@@ -69,12 +72,36 @@ def  process_document(file_path: str,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap
             )
+
+
+        # Store in ChromaDB
+        if store_in_db and result.get("chunks"):
+
+            store = ChromaStore()
+            chunks = result["chunks"]
+            texts = [chunk["text"] for chunk in chunks]
+            metadatas = []
+
+            for chunk in chunks:
+                meta = {
+                    "filename": result["file_info"]["filename"],
+                    "file_type": file_type,
+                    "page_number": chunk.get("page_number", 1),
+                    "chunk_id": chunk.get("chunk_id"),
+                    "char_count": chunk.get("char_count"),
+                }
+                metadatas.append(meta)
+            
+            store.add_chunks(chunks=texts, metadatas=metadatas)
+            logger.info(f"Stored {len(result['chunks'])} chunks in ChromaDB.")    
+
         # Add common metadata
         total_time = round(time.time() - start_time, 2)
         result["pipeline_info"] = {
             "processed_by": "document_processor",
             "file_type_detected": file_type,
-            "total_pipeline_time_seconds": total_time
+            "total_pipeline_time_seconds": total_time,
+            "stored_in_db": store_in_db
         }
 
         logger.info(
@@ -88,42 +115,29 @@ def  process_document(file_path: str,
         logger.error(f"Failed to process document '{file_path_obj.name}': {str(e)}")
         raise
 
-
 # ============================================================
-#                      TESTING SECTION
+# TESTING SECTION
 # ============================================================
 if __name__ == "__main__":
-    # ============ UPDATE THESE PATHS ============
     test_pdf = "/Users/amritanshudash/Desktop/LedgerMind/data/EX-21.1.pdf"
-    test_txt = "/Users/amritanshudash/Desktop/LedgerMind/data/raw/sec-edgar-filings/AAPL/10-K/0000320193-24-000123/full-submission.txt"   # ← Change this to a real .txt or .md file
-    # ============================================
 
     print("\n" + "="*60)
-    print("TESTING DOCUMENT PROCESSOR")
+    print("TESTING DOCUMENT PROCESSOR + CHROMADB")
     print("="*60)
 
-    # ---------- Test PDF ----------
-    print("\n1. Testing PDF file...")
     try:
-        result = process_document(test_pdf, chunk_size=1000, chunk_overlap=200)
-        print(f"✅ PDF Success!")
-        print(f"   File      : {result['file_info']['filename']}")
-        print(f"   Chunks    : {result['stats']['total_chunks']}")
-        print(f"   Time      : {result['pipeline_info']['total_pipeline_time_seconds']}s")
+        result = process_document(
+            test_pdf,
+            chunk_size=1000,
+            chunk_overlap=200,
+            store_in_db=True
+        )
+        print(f"\n✅ Success!")
+        print(f"File     : {result['file_info']['filename']}")
+        print(f"Chunks   : {result['stats']['total_chunks']}")
+        print(f"Time     : {result['pipeline_info']['total_pipeline_time_seconds']}s")
+        print(f"Stored in DB: {result['pipeline_info']['stored_in_db']}")
     except Exception as e:
-        print(f"❌ PDF Failed: {e}")
-
-    # ---------- Test TXT ----------
-    print("\n2. Testing TXT/MD file...")
-    try:
-        result = process_document(test_txt, chunk_size=1000, chunk_overlap=200)
-        print(f"✅ TXT Success!")
-        print(f"   File      : {result['file_info']['filename']}")
-        print(f"   Chunks    : {result['stats']['total_chunks']}")
-        print(f"   Time      : {result['pipeline_info']['total_pipeline_time_seconds']}s")
-    except Exception as e:
-        print(f"❌ TXT Failed: {e}")
+        print(f"\n❌ Failed: {e}")
 
     print("\n" + "="*60)
-    print("Testing completed.")
-    print("="*60)

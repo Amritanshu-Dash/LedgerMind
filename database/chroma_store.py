@@ -143,10 +143,68 @@ class ChromaStore:
     
     def clear_collection(self) -> None:
         """
-        Clear all documents from the ChromaDB collection.
+        Delete all documents by removing and recreating the collection.
+        This is the most reliable way in current ChromaDB versions.
         """
         logger.warning(f"Clearing all documents from collection '{self.collection_name}'...")
-        self.collection.delete(where={}) # Deletes all documents but keeps the collection
-        logger.info("Collection cleared.")
-    
+        
+        # Delete the old collection
+        self.client.delete_collection(name=self.collection_name)
+        
+        # Recreate a fresh collection
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"}
+        )
+        
+        logger.info("Collection cleared and recreated successfully.")
 
+
+# ============================================================
+#                      TESTING SECTION
+# ============================================================
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("TESTING CHROMA STORE")
+    print("="*60)
+
+    # Initialize store
+    store = ChromaStore()
+
+    # Sample chunks for testing
+    sample_chunks = [
+        "Apple Inc. reported strong revenue growth in the fiscal year 2025.",
+        "The company's services segment continues to be a major profit driver.",
+        "iPhone sales remained stable despite global economic challenges.",
+        "Apple is investing heavily in artificial intelligence and machine learning.",
+        "The company maintains a strong cash position and returns capital to shareholders."
+    ]
+
+    sample_metadatas = [
+        {"source": "Apple_10K_2025", "page": 12, "section": "Revenue"},
+        {"source": "Apple_10K_2025", "page": 18, "section": "Services"},
+        {"source": "Apple_10K_2025", "page": 25, "section": "Products"},
+        {"source": "Apple_10K_2025", "page": 40, "section": "R&D"},
+        {"source": "Apple_10K_2025", "page": 55, "section": "Capital Return"}
+    ]
+
+    # Add chunks
+    store.add_chunks(chunks=sample_chunks, metadatas=sample_metadatas)
+
+    # Show info
+    info = store.get_collection_info()
+    print(f"\nCollection Info: {info}")
+
+    # Test search
+    print("\nSearching for: 'What about Apple AI investment?'")
+    results = store.search("What about Apple AI investment?", n_results=2)
+
+    print("\nTop Results:")
+    for i, result in enumerate(results):
+        print(f"\n{i+1}. {result['document']}")
+        print(f"   Metadata: {result['metadata']}")
+        print(f"   Distance: {result['distance']:.4f}")
+
+    print("\n" + "="*60)
+    print("Testing completed successfully!")
+    print("="*60)
