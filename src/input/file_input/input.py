@@ -246,7 +246,7 @@ if __name__ == "__main__":
     )
     try:
         # path = get_file("https://example.com/sample.pdf")
-        path = get_file("/Users/yourname/Documents/sample.pdf")
+        path = get_file("/Users/amritanshudash/Downloads/FY26_Q1_Consolidated_Financial_Statements.pdf")
         print("✅ File ready at:", path)
     except Exception as e:
         print("❌ Error:", str(e))

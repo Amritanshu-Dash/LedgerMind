@@ -10,3 +10,8 @@ beautifulsoup4
 html2text 
 lxml
 langchain_core
+torch 
+torchvision 
+transformers 
+pillow
+docx
