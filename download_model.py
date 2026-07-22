@@ -1,4 +1,4 @@
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download,list_repo_files
 from pathlib import Path
 
 # Create models directory
@@ -7,9 +7,16 @@ models_dir.mkdir(exist_ok=True)
 
 repo_id = "cjpais/llava-1.6-mistral-7b-gguf"
 
+files = list_repo_files(repo_id)
+for f in files:
+    if "mmproj" in f:
+        print("📌", f)
+
+
+
 files = [
     "llava-v1.6-mistral-7b.Q4_K_M.gguf",
-    "mmproj-llava-v1.6-mistral-7b-f16.gguf"
+    "mmproj-model-f16.gguf"
 ]
 
 for filename in files:

@@ -4,7 +4,7 @@ Test Script for txt_ingestion.py
 Use this to test TXT and Markdown file processing.
 """
 
-from txt_file_ingestion import process_txt
+from ingestion.txt_md_ingestion_module.txt_md_ingestion import process_txt
 import logging
 
 # Configure logging
