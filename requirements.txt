@@ -15,3 +15,7 @@ torchvision
 transformers 
 pillow
 docx
+llama-cpp-python
+huggingface_hub
+
+/* CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --force-reinstall --no-cache-dir */

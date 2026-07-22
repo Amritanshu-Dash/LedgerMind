@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Dict, Any
 import tempfile
 import os
 import io
@@ -9,7 +9,19 @@ import fitz  # pymupdf
 from docx import Document
 from PIL import Image
 
-from .vision_model import analyze_images
+# ============================================================
+# VISION MODEL SWITCH
+# Just comment / uncomment the model you want to use
+# ============================================================
+
+from .vision_model import analyze_images                  # ← Currently Active (MiniCPM-V)
+
+# from .vision_model_florence import analyze_images
+# from .vision_model_llava import analyze_images
+# from .vision_model_moondream import analyze_images
+# from .vision_model_qwen import analyze_images
+
+# ============================================================
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +34,6 @@ class ExtractionError(Exception):
 def extract_content(file_path: str) -> Dict[str, Any]:
     """
     Main function: Extract all useful content from a document.
-    
-    Returns:
-        {
-            "text": str,
-            "normal_text": str,
-            "vision_text": str,
-            "images_found": int,
-            "file_type": str
-        }
     """
     path = Path(file_path).resolve()
 
@@ -62,36 +65,33 @@ def _extract_pdf(path: Path) -> Dict[str, Any]:
     normal_text_parts = []
     image_paths = []
 
-    for page in doc:
-        text = page.get_text("text").strip()
-        if text:
-            normal_text_parts.append(text)
+    with tempfile.TemporaryDirectory(prefix="pdf_images_") as temp_dir:
+        try:
+            for page in doc:
+                text = page.get_text("text").strip()
+                if text:
+                    normal_text_parts.append(text)
 
-        for img in page.get_images(full=True):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-            image_ext = base_image["ext"]
+                for img in page.get_images(full=True):
+                    try:
+                        xref = img[0]
+                        base_image = doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        image_ext = base_image["ext"]
 
-            temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=f".{image_ext}")
-            temp_img.write(image_bytes)
-            temp_img.close()
-            image_paths.append(temp_img.name)
+                        temp_path = Path(temp_dir) / f"image_{xref}.{image_ext}"
+                        temp_path.write_bytes(image_bytes)
+                        image_paths.append(str(temp_path))
+                    except Exception as ex:
+                        logger.warning(f"Skipping unreadable image: {ex}")
+        finally:
+            doc.close()
 
-    doc.close()
+        normal_text = "\n\n".join(normal_text_parts).strip()
+        vision_text = ""
 
-    normal_text = "\n\n".join(normal_text_parts).strip()
-    vision_text = ""
-
-    if image_paths:
-        vision_text = analyze_images(image_paths)
-
-        # Clean temporary images
-        for img_path in image_paths:
-            try:
-                os.unlink(img_path)
-            except Exception:
-                pass
+        if image_paths:
+            vision_text = analyze_images(image_paths)
 
     final_text = _combine_text(normal_text, vision_text)
 
@@ -109,31 +109,28 @@ def _extract_docx(path: Path) -> Dict[str, Any]:
     normal_text_parts = []
     image_paths = []
 
-    for para in doc.paragraphs:
-        if para.text.strip():
-            normal_text_parts.append(para.text.strip())
+    with tempfile.TemporaryDirectory(prefix="docx_images_") as temp_dir:
+        for para in doc.paragraphs:
+            if para.text.strip():
+                normal_text_parts.append(para.text.strip())
 
-    for rel in doc.part.rels.values():
-        if "image" in rel.target_ref:
-            image_data = rel.target_part.blob
-            image = Image.open(io.BytesIO(image_data))
+        for rel in doc.part.rels.values():
+            if "image" in rel.target_ref:
+                try:
+                    image_data = rel.target_part.blob
+                    image = Image.open(io.BytesIO(image_data))
 
-            temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            image.save(temp_img.name)
-            temp_img.close()
-            image_paths.append(temp_img.name)
+                    temp_path = Path(temp_dir) / f"image_{len(image_paths)}.png"
+                    image.save(str(temp_path))
+                    image_paths.append(str(temp_path))
+                except Exception as ex:
+                    logger.warning(f"Skipping unreadable image in docx: {ex}")
 
-    normal_text = "\n\n".join(normal_text_parts).strip()
-    vision_text = ""
+        normal_text = "\n\n".join(normal_text_parts).strip()
+        vision_text = ""
 
-    if image_paths:
-        vision_text = analyze_images(image_paths)
-
-        for img_path in image_paths:
-            try:
-                os.unlink(img_path)
-            except Exception:
-                pass
+        if image_paths:
+            vision_text = analyze_images(image_paths)
 
     final_text = _combine_text(normal_text, vision_text)
 
