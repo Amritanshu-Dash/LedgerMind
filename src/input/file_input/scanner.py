@@ -9,31 +9,22 @@ model ever touches it. Nothing downstream should trust a file that hasn't
 come back "safe" from this module.
 
 Why this isn't just "run ClamAV and call it a day":
-A signature scanner (ClamAV or any other) can only catch malware that's
-already known and in its database. That leaves real gaps:
+A signature scanner (ClamAV or any other) can only catch malware that's already known and in its database. 
+That leaves real gaps:
   - Brand-new / custom-crafted malicious files (no signature exists yet).
-  - "Zip bombs" — a tiny DOCX/XLSX (which are just ZIP files under the
-    hood) that decompresses into gigabytes and hangs or crashes whatever
-    tries to unzip it downstream. This isn't "malware" a signature
-    database would flag, but it can take your app down just as hard.
-  - Office documents with embedded macros — not always flagged by
-    signatures, and we never need macros to read financial data anyway.
+  - "Zip bombs" — a tiny DOCX/XLSX (which are just ZIP files under the hood) that decompresses into gigabytes and hangs or crashes whatever tries to unzip it downstream. This isn't "malware" a signature database would flag, but it can take your app down just as hard.
+  - Office documents with embedded macros — not always flagged by signatures, and we never need macros to read financial data anyway.
   - PDFs with embedded JavaScript / launch actions — same story.
   - A file whose extension lies about what it actually is.
-So this module runs several independent layers, in order from cheapest to
-most expensive, and rejects at the first layer that fails. ClamAV is one
-layer among several, not the whole defense.
+So this module runs several independent layers, in order from cheapest to most expensive, and rejects at the first layer that fails. ClamAV is one layer among several, not the whole defense.
 
 Operational note:
-ClamAV's own signature database (layer below) is only useful if freshclam
-runs on its own schedule outside this app. A clean scan against a stale
-database is a false sense of security — this module cannot fix that,
+ClamAV's own signature database (layer below) is only useful if freshclam runs on its own schedule outside this app. A clean scan against a stale database is a false sense of security — this module cannot fix that,
 only remind you of it.
 
 Fail-open vs fail-closed:
-Every exception this module raises means "reject the file." Callers must
-never catch one of these and let the file through anyway — that would
-defeat the entire point of having a guardian stage.
+Every exception this module raises means "reject the file." Callers must never catch one of these and let the file through anyway — that would defeat the entire point of having a guardian stage.
+
 """
 
 import logging               # structured logging instead of print()
@@ -97,17 +88,16 @@ class MalwareDetectedError(Exception):
 
 
 class SuspiciousFileError(Exception):
-    """Raised when a file fails a structural check — zip bomb, embedded
-    macro, active PDF content, or a mismatched file type. No virus
-    signature is needed to catch these; the file's own structure is
-    the evidence."""
+    """
+    Raised when a file fails a structural check — zip bomb, embedded macro, active PDF content, or a mismatched file type. No virus signature is needed to catch these; the file's own structure is the evidence.
+    """
     pass
 
 
 class ScannerNotAvailableError(Exception):
-    """Raised when ClamAV is not installed or not working. Callers must
-    treat this as fail-closed — do NOT let the file through just because
-    the signature scanner itself is unavailable."""
+    """
+    Raised when ClamAV is not installed or not working. Callers must treat this as fail-closed — do NOT let the file through just because the signature scanner itself is unavailable.
+    """
     pass
 
 
