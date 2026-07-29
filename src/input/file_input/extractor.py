@@ -1,37 +1,22 @@
 """
 extractor.py
 ------------
-Content extraction stage — the second real step of the pipeline (after
-input.py receives the file and scanner.py confirms it's safe).
+Content extraction stage — the second real step of the pipeline (after input.py receives the file and scanner.py confirms it's safe).
 
 Purpose:
-Pulls out everything useful from a document: normal text directly where
-that's trustworthy, and anything image-based or layout-complex (charts,
-scanned receipts, dense tables) via a call out to the vision model.
+Pulls out everything useful from a document: normal text directly wherethat's trustworthy, and anything image-based or layout-complex (charts, scanned receipts, dense tables) via a call out to the vision model.
 Returns one combined result per file.
 
 Design goals:
-1. Never throw away good work because of a partial failure. If normal text
-   extraction succeeds but the vision model fails on the images, the
-   caller should still get the normal text back, with a clear note that
+1. Never throw away good work because of a partial failure. If normal text extraction succeeds but the vision model fails on the images, the caller should still get the normal text back, with a clear note that
    image analysis didn't complete — not nothing at all.
-2. Hard caps on pages/images/text length, enforced HERE, not just trusted
-   to whatever cap the vision model happens to have.
-3. Don't blindly trust raw text extraction on every page. Complex layouts
-   (dense tables, multi-column financial statements, heavily-drawn pages)
-   often extract as garbled or scrambled text even though no literal
-   embedded image is present. Per project decision, this extractor errs
-   toward routing a page to the vision model whenever ANY unusual layout
-   signal shows up — favoring accuracy over the extra vision-model calls
-   that costs, since the model runs locally rather than as a paid API.
-   Known limitation: this page-render heuristic currently only applies to
-   PDFs. DOCX tables are still handled via python-docx's own paragraph/
-   image extraction — a future improvement would read doc.tables directly
-   (python-docx exposes table cells structurally, no vision model needed
-   for those at all), but that's not implemented yet.
-4. Match whatever the currently active vision model module actually
-   returns — a structured VisionAnalysisResult (accepted / rejected
-   images), not a plain string.
+2. Hard caps on pages/images/text length, enforced HERE, not just trusted to whatever cap the vision model happens to have.
+3. Don't blindly trust raw text extraction on every page. Complex layouts (dense tables, multi-column financial statements, heavily-drawn pages) often extract as garbled or scrambled text even though no literal
+   embedded image is present. Per project decision, this extractor errs toward routing a page to the vision model whenever ANY unusual layout signal shows up — favoring accuracy over the extra vision-model calls
+   that costs, since the model runs locally rather than as a paid API. 
+   Known limitation: this page-render heuristic currently only applies to PDFs. DOCX tables are still handled via python-docx's own paragraph/ image extraction — a future improvement would read doc.tables directly
+   (python-docx exposes table cells structurally, no vision model needed for those at all), but that's not implemented yet.
+4. Match whatever the currently active vision model module actually returns — a structured VisionAnalysisResult (accepted / rejected images), not a plain string.
 """
 
 import io                            # in-memory byte buffers for DOCX embedded images
@@ -52,10 +37,9 @@ from PIL import Image                # decodes embedded image bytes before re-sa
 # lists, not a plain string.
 # ============================================================
 
-from .vision_model import analyze_images                  # ← Currently Active (MiniCPM-V)
-
+# from .vision_model import analyze_images                  
 # from .vision_model_florence import analyze_images
-# from .vision_model_llava import analyze_images
+from .vision_model_llava import analyze_images
 # from .vision_model_moondream import analyze_images
 # from .vision_model_qwen import analyze_images
 
@@ -135,13 +119,9 @@ def extract_content(file_path: str) -> Dict[str, Any]:
 
 def _run_vision_model(image_paths: List[str]) -> Dict[str, Any]:
     """
-    Shared helper for every extraction path that produced images (embedded
-    pictures or full-page renders). Calls the vision model and turns its
-    VisionAnalysisResult into the plain values the rest of this file needs.
+    Shared helper for every extraction path that produced images (embedded pictures or full-page renders). Calls the vision model and turns its VisionAnalysisResult into the plain values the rest of this file needs.
 
-    Isolated in its own try/except: if the vision model fails outright
-    (worker crashed past its retry limit, etc), that must NOT destroy
-    normal_text that was already successfully extracted elsewhere.
+    Isolated in its own try/except: if the vision model fails outright (worker crashed past its retry limit, etc), that must NOT destroy normal_text that was already successfully extracted elsewhere.
     """
     if not image_paths:
         return {"vision_text": "", "images_rejected": 0, "rejection_reasons": []}
@@ -172,11 +152,8 @@ def _run_vision_model(image_paths: List[str]) -> Dict[str, Any]:
 
 def _page_has_complex_layout(page: "fitz.Page") -> bool:
     """
-    Heuristic: decide whether a page's raw text extraction is untrustworthy
-    enough to route the whole page to the vision model instead. Tuned to
-    err toward flagging pages as complex — a false positive just costs one
-    extra (local, free) vision-model call; a false negative means silently
-    feeding garbled table data into a financial prediction.
+    Heuristic: decide whether a page's raw text extraction is untrustworthy enough to route the whole page to the vision model instead. Tuned to err toward flagging pages as complex — a false positive just costs one
+    extra (local, free) vision-model call; a false negative means silently feeding garbled table data into a financial prediction.
     """
     try:
         # Signal 1: heavily hand-drawn content (lines/rects) is a strong
@@ -218,9 +195,7 @@ def _page_has_complex_layout(page: "fitz.Page") -> bool:
 
 
 def _render_page_to_image(page: "fitz.Page", temp_dir: Path, page_number: int) -> Optional[str]:
-    """Renders a full page to a PNG for the vision model. Returns the temp
-    path, or None if rendering fails — a render failure should never take
-    down the whole extraction, just fall back to raw text for that page."""
+    """Renders a full page to a PNG for the vision model. Returns the temp path, or None if rendering fails — a render failure should never take down the whole extraction, just fall back to raw text for that page."""
     try:
         pix = page.get_pixmap(dpi=PAGE_RENDER_DPI)
         temp_path = temp_dir / f"page_render_{page_number}.png"
