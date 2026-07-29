@@ -1,40 +1,96 @@
-import logging
-from pathlib import Path
-from typing import Dict, Any
+"""
+orchestrator.py (input section)
+--------------------------------
+Ties the input-section pipeline together: get the file, scan it, extract
+its content. This file makes no decisions of its own about what's safe or
+what's extractable — every real decision lives in input.py / scanner.py /
+extractor.py. This file's only job is sequencing them and reporting a
+single consistent result, whichever stage the pipeline stops at.
 
-from .input import get_file
+Design goals:
+1. Never lose progress that already happened. If the file downloaded fine
+   and passed the scan but extraction failed, the caller should still be
+   able to see that — not just get a bare error string with everything
+   before it thrown away.
+2. Never leave a downloaded file sitting on disk longer than it needs to.
+   Local files the user pointed to directly are never touched — only
+   files THIS app downloaded into its own temp folder get cleaned up,
+   and as soon as they've been processed (successfully or not), not on
+   whatever schedule the lazy 24-hour reaper in input.py happens to run.
+3. Shared limits come from scanner.py, same as input.py already does —
+   no separate hardcoded copy of the size cap here to drift out of sync.
+"""
+
+import logging                            # structured logging instead of print()
+from pathlib import Path                  # safe, OS-independent path handling
+from typing import Any, Dict, Optional    # type hints so signatures are self-documenting
+
+from .input import get_file, TEMP_DOWNLOAD_DIR
 from .scanner import (
     scan_file,
+    DEFAULT_MAX_SIZE_MB,                  # single source of truth, same constant input.py uses
     MalwareDetectedError,
-    ScannerNotAvailableError
+    ScannerNotAvailableError,
+    SuspiciousFileError,
 )
 from .extractor import extract_content, ExtractionError
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)      # module-level logger tagged with this file's name
 
 
 class FileProcessingError(Exception):
-    """Raised when the overall file processing pipeline fails."""
-    pass
+    """
+    Raised when the overall file processing pipeline fails at any stage.
+
+    Carries the partial `result` dict built up before the failure (e.g.
+    local_path, scan_status if the scan already completed) so callers
+    don't lose that context just because a later stage failed. This
+    mirrors how MalwareDetectedError also gets a `.result` attached below
+    — every failure path preserves whatever progress had already happened,
+    not just the malware case.
+    """
+    def __init__(self, message: str, result: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.result = result
 
 
-def process_file(input_source: str, max_size_mb: float = 50.0) -> Dict[str, Any]:
+def _cleanup_downloaded_file(local_path: str) -> None:
+    """
+    Deletes a file ONLY if it lives inside input.py's own temp download
+    directory — never touches a path the user supplied directly. Called
+    after processing finishes, success or failure, so a downloaded file
+    (especially one that turned out to be infected) doesn't linger on
+    disk waiting for the next unrelated download to trigger cleanup.
+    """
+    try:
+        resolved = Path(local_path).resolve()
+        if resolved.parent == TEMP_DOWNLOAD_DIR.resolve():
+            resolved.unlink(missing_ok=True)
+            logger.debug(f"Cleaned up downloaded temp file: {resolved}")
+    except Exception as e:
+        # Cleanup failing is not itself a pipeline failure — log and move on.
+        logger.warning(f"Could not clean up downloaded temp file {local_path}: {e}")
+
+
+def process_file(input_source: str, max_size_mb: float = DEFAULT_MAX_SIZE_MB) -> Dict[str, Any]:
     """
     Full pipeline:
     1. Get / download the file
-    2. Scan for malware
+    2. Scan for malware (and structural issues — see scanner.py)
     3. Extract content (text + images via vision model)
     """
     logger.info(f"Starting file processing for: {input_source}")
 
-    result = {
+    result: Dict[str, Any] = {
         "input_source": input_source,
         "local_path": None,
         "scan_status": None,
         "message": None,
         "success": False,
-        "extraction": None
+        "extraction": None,
     }
+
+    local_path: Optional[str] = None
 
     try:
         # -------------------------
@@ -44,23 +100,20 @@ def process_file(input_source: str, max_size_mb: float = 50.0) -> Dict[str, Any]
         result["local_path"] = local_path
         logger.info(f"File ready at: {local_path}")
 
-        # Size check
-        actual_size_mb = Path(local_path).stat().st_size / (1024 * 1024)
-        if actual_size_mb > max_size_mb:
-            raise ValueError(
-                f"File too large ({actual_size_mb:.2f} MB). Max allowed: {max_size_mb} MB"
-            )
-
         # -------------------------
-        # Step 2: Malware Scan
+        # Step 2: Malware / structural scan
         # -------------------------
         scan_result = scan_file(
             file_path=local_path,
-            max_size_mb=max_size_mb
+            max_size_mb=max_size_mb,
+            allowed_base_dir=str(TEMP_DOWNLOAD_DIR),  # only meaningful for downloaded files;
+                                                        # see the note in scanner.py — a path
+                                                        # outside this dir simply won't match,
+                                                        # which is fine for user-supplied local files
         )
 
-        result["scan_status"] = scan_result["status"]
-        result["message"] = scan_result["message"]
+        result["scan_status"] = scan_result.status
+        result["message"] = f"Passed all safety checks: {', '.join(scan_result.checks_passed)}"
 
         # -------------------------
         # Step 3: Content Extraction
@@ -77,28 +130,48 @@ def process_file(input_source: str, max_size_mb: float = 50.0) -> Dict[str, Any]
         logger.warning(f"Malware detected: {e}")
         result["scan_status"] = "infected"
         result["message"] = str(e)
-        e.result = result
+        e.result = result  # attach partial progress for callers, same as FileProcessingError does
         raise
+
+    except SuspiciousFileError as e:
+        # Structural rejection (zip bomb, macro, PDF active content, magic
+        # byte mismatch) — same fail-closed treatment as actual malware.
+        logger.warning(f"File rejected on structural grounds: {e}")
+        result["scan_status"] = "rejected"
+        result["message"] = str(e)
+        raise FileProcessingError(str(e), result=result)
 
     except ExtractionError as e:
         logger.error(f"Extraction failed: {e}")
-        raise FileProcessingError(str(e))
+        result["message"] = str(e)
+        raise FileProcessingError(str(e), result=result)
 
     except FileNotFoundError as e:
         logger.error(f"File not found: {e}")
-        raise FileProcessingError(str(e))
+        result["message"] = str(e)
+        raise FileProcessingError(str(e), result=result)
 
     except ScannerNotAvailableError as e:
         logger.error(f"Scanner not available: {e}")
-        raise FileProcessingError(str(e))
+        result["message"] = str(e)
+        raise FileProcessingError(str(e), result=result)
 
     except ValueError as e:
         logger.error(f"Validation error: {e}")
-        raise FileProcessingError(str(e))
+        result["message"] = str(e)
+        raise FileProcessingError(str(e), result=result)
 
     except Exception as e:
         logger.error(f"Unexpected error during file processing: {e}")
-        raise FileProcessingError(f"File processing failed: {str(e)}")
+        result["message"] = str(e)
+        raise FileProcessingError(f"File processing failed: {str(e)}", result=result)
+
+    finally:
+        # Whatever happened above — success, malware, or any other
+        # failure — a file THIS app downloaded should not linger. User-
+        # supplied local files are never touched (see _cleanup_downloaded_file).
+        if local_path is not None:
+            _cleanup_downloaded_file(local_path)
 
 
 # ==============================
@@ -127,5 +200,9 @@ if __name__ == "__main__":
         print("...")
     except MalwareDetectedError as e:
         print("❌ Infected file:", e)
+    except FileProcessingError as e:
+        print("❌ Processing failed:", str(e))
+        if e.result:
+            print("   Partial progress:", {k: v for k, v in e.result.items() if k != "extraction"})
     except Exception as e:
-        print("❌ Error:", str(e))
+        print("❌ Unexpected error:", str(e))

@@ -1,41 +1,26 @@
 """
 input.py
 --------
-Input acquisition stage — the FIRST step of the pipeline, before the
-scanner ever sees a file. Accepts either a local file path or a public
-URL and turns either one into a validated local file path.
+Input acquisition stage — the FIRST step of the pipeline, before the scanner ever sees a file. Accepts either a local file path or a public URL and turns either one into a validated local file path.
 
 Purpose:
-This file's job is narrow and deliberately dumb: "get me a real, readable,
-reasonably-sized, plausibly-supported file onto local disk." It does NOT
-scan for malware (scanner.py) and does NOT decide if content is
+This file's job is narrow and deliberately dumb: "get me a real, readable, reasonably-sized, plausibly-supported file onto local disk." It does NOT scan for malware (scanner.py) and does NOT decide if content is
 extractable (extractor.py) — those are separate concerns, separate files.
 
 Why the URL path needs its own guardian logic (SSRF):
-Unlike a local file path (which the person running this app already has
-access to), a URL means THIS APPLICATION makes an outbound network
-request on the caller's behalf. Without care, that turns this app into a
-proxy an attacker can use to reach things it shouldn't — internal
-services, cloud metadata endpoints (a common source of leaked
-credentials), or anything else on a private network. So every URL is
-validated against private/loopback/link-local address ranges BEFORE any
-connection is made, and every redirect hop is re-validated the same way,
-since a URL that looks safe can still redirect somewhere unsafe.
+Unlike a local file path (which the person running this app already has access to), a URL means THIS APPLICATION makes an outbound network request on the caller's behalf. Without care, that turns this app into a
+proxy an attacker can use to reach things it shouldn't — internal services, cloud metadata endpoints (a common source of leaked credentials), or anything else on a private network. So every URL is
+validated against private/loopback/link-local address ranges BEFORE any connection is made, and every redirect hop is re-validated the same way, since a URL that looks safe can still redirect somewhere unsafe.
 
-Honest limitation: this defends against the common case (an attacker
-supplying an obviously-internal URL or a malicious redirect), but does
-not fully close DNS-rebinding attacks, where a hostname's IP changes
-between our validation check and the actual connection. Fully closing
-that would mean pinning the connection to the exact IP we validated
-(bypassing a second DNS lookup at request time), which adds real
-complexity — not implemented here, flagged as a known gap rather than
-silently claimed as solved.
+Honest limitation: 
+this defends against the common case (an attacker supplying an obviously-internal URL or a malicious redirect), but does not fully close DNS-rebinding attacks, where a hostname's IP changes
+between our validation check and the actual connection. Fully closing that would mean pinning the connection to the exact IP we validated (bypassing a second DNS lookup at request time), which adds real
+complexity — not implemented here, flagged as a known gap rather than silently claimed as solved.
 
 Shared constants:
-File size and extension limits are imported directly from scanner.py
-rather than redefined here, so the two stages can never quietly drift
-out of sync (e.g. this file allowing a 500MB download that the scanner
+File size and extension limits are imported directly from scanner.py rather than redefined here, so the two stages can never quietly drift out of sync (e.g. this file allowing a 500MB download that the scanner
 was only ever going to reject at 50MB).
+
 """
 
 import ipaddress                       # checks resolved IPs against private/loopback/reserved ranges
