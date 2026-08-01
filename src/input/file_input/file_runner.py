@@ -25,7 +25,7 @@ import logging                            # structured logging instead of print(
 from pathlib import Path                  # safe, OS-independent path handling
 from typing import Any, Dict, Optional    # type hints so signatures are self-documenting
 
-from .input import get_file, TEMP_DOWNLOAD_DIR
+from ._01_input import get_file, TEMP_DOWNLOAD_DIR
 from .scanner import (
     scan_file,
     DEFAULT_MAX_SIZE_MB,                  # single source of truth, same constant input.py uses

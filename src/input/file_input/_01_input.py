@@ -4,23 +4,23 @@ input.py
 Input acquisition stage — the FIRST step of the pipeline, before the scanner ever sees a file. Accepts either a local file path or a public URL and turns either one into a validated local file path.
 
 Purpose:
-This file's job is narrow and deliberately dumb: "get me a real, readable, reasonably-sized, plausibly-supported file onto local disk." It does NOT scan for malware (scanner.py) and does NOT decide if content is
-extractable (extractor.py) — those are separate concerns, separate files.
+-> This file's job is narrow and deliberately dumb: "get me a real, readable, reasonably-sized, plausibly-supported file onto local disk." It does NOT scan for malware (scanner.py) and does NOT decide if content is extractable (extractor.py) — those are separate concerns, separate files.
 
 Why the URL path needs its own guardian logic (SSRF):
-Unlike a local file path (which the person running this app already has access to), a URL means THIS APPLICATION makes an outbound network request on the caller's behalf. Without care, that turns this app into a
-proxy an attacker can use to reach things it shouldn't — internal services, cloud metadata endpoints (a common source of leaked credentials), or anything else on a private network. So every URL is
-validated against private/loopback/link-local address ranges BEFORE any connection is made, and every redirect hop is re-validated the same way, since a URL that looks safe can still redirect somewhere unsafe.
+-> Unlike a local file path (which the person running this app already has access to), a URL means THIS APPLICATION makes an outbound network request on the caller's behalf. Without care, that turns this app into a proxy an attacker can use to reach things it shouldn't — internal
+services, cloud metadata endpoints (a common source of leaked credentials), or anything else on a private network. So every URL is validated against private/loopback/link-local address ranges BEFORE any connection is made, and every redirect hop is re-validated the same way,
+since a URL that looks safe can still redirect somewhere unsafe.
 
 Honest limitation: 
-this defends against the common case (an attacker supplying an obviously-internal URL or a malicious redirect), but does not fully close DNS-rebinding attacks, where a hostname's IP changes
-between our validation check and the actual connection. Fully closing that would mean pinning the connection to the exact IP we validated (bypassing a second DNS lookup at request time), which adds real
-complexity — not implemented here, flagged as a known gap rather than silently claimed as solved.
+-> this defends against the common case (an attacker supplying an obviously-internal URL or a malicious redirect), but does not fully close DNS-rebinding attacks, where a hostname's IP changes between our validation check and the actual connection. Fully closing
+that would mean pinning the connection to the exact IP we validated (bypassing a second DNS lookup at request time), which adds real complexity — not implemented here, flagged as a known gap rather than silently claimed as solved.
+
+Download-window hardening:
+-> Between a file finishing its download and the scanner examining it, two small but real steps reduce exposure: the file is immediately given restrictive permissions (owner read/write only, never executable), and the temp download folder is marked to be excluded from macOS
+Spotlight/QuickLook indexing — so the OS itself never tries to parse or preview a file before the scanner gets a chance to.
 
 Shared constants:
-File size and extension limits are imported directly from scanner.py rather than redefined here, so the two stages can never quietly drift out of sync (e.g. this file allowing a 500MB download that the scanner
-was only ever going to reject at 50MB).
-
+-> File size and extension limits are imported from constants.py (which both this file and scanner.py rely on), so the two stages can never quietly drift out of sync (e.g. this file allowing a 500MB download that the scanner was only ever going to reject at 50MB).
 """
 
 import ipaddress                       # checks resolved IPs against private/loopback/reserved ranges
@@ -37,8 +37,7 @@ from uuid import uuid4                 # unique temp filenames, avoids collision
 
 import requests                        # HTTP client for downloading remote files
 
-from .scanner import ALLOWED_EXTENSIONS as SUPPORTED_EXTENSIONS  # single source of truth, see module docstring
-from .scanner import DEFAULT_MAX_SIZE_MB as MAX_FILE_SIZE_MB     # same — kept in sync with the scanner's own cap
+from ._00_constants import SUPPORTED_FILE_EXTENSIONS, DEFAULT_MAX_UPLOAD_FILE_SIZE_MB, TEMP_DOWNLOAD_DIRECTORY_PATH
 
 logger = logging.getLogger(__name__)   # module-level logger tagged with this file's name
 
@@ -46,19 +45,18 @@ logger = logging.getLogger(__name__)   # module-level logger tagged with this fi
 # ==============================
 # Configuration
 # ==============================
-# Note: MAX_FILE_SIZE_MB and SUPPORTED_EXTENSIONS are imported from
-# scanner.py above, not defined here — see the module docstring for why.
+# Note: MAX_UPLOAD_FILE_SIZE_MB, SUPPORTED_FILE_EXTENSIONS, and
+# TEMP_DOWNLOAD_DIRECTORY_PATH are imported from constants.py above, not
+# defined here — see the module docstring for why.
 
 DOWNLOAD_TIMEOUT = 120          # seconds, bounds TOTAL download wall-clock time (see the manual check below)
-TEMP_DOWNLOAD_DIR = Path(__file__).resolve().parent / "temp_downloads"
 MAX_TEMP_FILE_AGE_HOURS = 24     # auto-delete temp files older than this
 MAX_REDIRECTS = 5                # redirect hops we'll follow, each one re-validated for SSRF
+SPOTLIGHT_EXCLUSION_MARKER = ".metadata_never_index"  # macOS: tells Spotlight/QuickLook to skip this folder
 
 
 class SuspiciousURLError(Exception):
-    """Raised when a URL resolves to a private/internal/reserved address,
-    or a redirect tries to send us to one. Callers must treat this as
-    fail-closed — never fetch the URL anyway."""
+    """Raised when a URL resolves to a private/internal/reserved address, or a redirect tries to send us to one. Callers must treat this as fail-closed — never fetch the URL anyway."""
     pass
 
 
@@ -82,19 +80,36 @@ def get_file_extension(path: str) -> str:
 
 def is_supported_file(path: str) -> bool:
     """Check if file type is supported by extension."""
-    return get_file_extension(path) in SUPPORTED_EXTENSIONS
+    return get_file_extension(path) in SUPPORTED_FILE_EXTENSIONS
+
+
+def _ensure_spotlight_exclusion() -> None:
+    """
+    Creates a `.metadata_never_index` marker file inside the temp download directory — a macOS-specific convention that tells Spotlight/QuickLook not to automatically index or generate thumbnails for files in this folder. Matters because a downloaded file sits on disk for a moment
+    before the scanner gets to it; if the OS itself tries to parse/preview it first (for indexing), a malicious file could exploit a bug in THAT parser before our own scan ever runs. This is a no-op on non-macOS systems — the marker file is simply ignored there, so it's safe to
+    always attempt.
+    """
+    try:
+        marker_path = TEMP_DOWNLOAD_DIRECTORY_PATH / SPOTLIGHT_EXCLUSION_MARKER
+        if not marker_path.exists():
+            marker_path.touch()
+    except Exception as e:
+        # Not being able to create this marker is not worth failing the
+        # whole download over — it's a hardening measure, not a hard
+        # requirement.
+        logger.debug(f"Could not create Spotlight exclusion marker: {e}")
 
 
 def cleanup_old_temp_files():
     """Delete temporary files older than MAX_TEMP_FILE_AGE_HOURS."""
-    if not TEMP_DOWNLOAD_DIR.exists():
+    if not TEMP_DOWNLOAD_DIRECTORY_PATH.exists():
         logger.debug("Temp directory does not exist, skipping cleanup.")
         return
 
     cutoff = datetime.now() - timedelta(hours=MAX_TEMP_FILE_AGE_HOURS)
     deleted_count = 0
 
-    for file in TEMP_DOWNLOAD_DIR.iterdir():
+    for file in TEMP_DOWNLOAD_DIRECTORY_PATH.iterdir():
         if file.is_file():
             file_mtime = datetime.fromtimestamp(file.stat().st_mtime)
             if file_mtime < cutoff:
@@ -127,9 +142,9 @@ def validate_local_file(file_path: str) -> str:
         raise PermissionError(f"No read permission for file: {path}")
 
     file_size_mb = path.stat().st_size / (1024 * 1024)
-    if file_size_mb > MAX_FILE_SIZE_MB:
+    if file_size_mb > DEFAULT_MAX_UPLOAD_FILE_SIZE_MB:
         raise ValueError(
-            f"File too large ({file_size_mb:.2f} MB). Max allowed is {MAX_FILE_SIZE_MB} MB"
+            f"File too large ({file_size_mb:.2f} MB). Max allowed is {DEFAULT_MAX_UPLOAD_FILE_SIZE_MB} MB"
         )
 
     if not is_supported_file(str(path)):
@@ -145,12 +160,9 @@ def validate_local_file(file_path: str) -> str:
 
 def _assert_url_is_safe(url: str) -> None:
     """
-    Resolves the URL's hostname and rejects it if any resolved address is
-    private, loopback, link-local, reserved, or otherwise not a normal
-    public internet address. Raises SuspiciousURLError if unsafe.
+    Resolves the URL's hostname and rejects it if any resolved address is private, loopback, link-local, reserved, or otherwise not a normal public internet address. Raises SuspiciousURLError if unsafe.
 
-    Called once for the original URL, and again for every redirect hop —
-    a URL that looks safe can still redirect somewhere that isn't.
+    Called once for the original URL, and again for every redirect hop — a URL that looks safe can still redirect somewhere that isn't.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -201,7 +213,8 @@ def download_from_url(url: str) -> str:
     logger.info(f"Starting download from URL: {url}")
     _assert_url_is_safe(url)  # first check, before any connection is made
 
-    TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_DOWNLOAD_DIRECTORY_PATH.mkdir(parents=True, exist_ok=True)
+    _ensure_spotlight_exclusion()
     cleanup_old_temp_files()
 
     headers = {
@@ -274,14 +287,14 @@ def download_from_url(url: str) -> str:
 
         # Unique name to avoid collisions
         unique_filename = f"{uuid4().hex}_{filename}"
-        local_path = TEMP_DOWNLOAD_DIR / unique_filename
+        local_path = TEMP_DOWNLOAD_DIRECTORY_PATH / unique_filename
         logger.debug(f"Saving file as: {unique_filename}")
 
         # -----------------------------------------------------------------
         # Download with size + timeout protection
         # -----------------------------------------------------------------
         total_size = 0
-        max_size_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+        max_size_bytes = DEFAULT_MAX_UPLOAD_FILE_SIZE_MB * 1024 * 1024
         start_time = time.time()
 
         try:
@@ -294,7 +307,7 @@ def download_from_url(url: str) -> str:
                         total_size += len(chunk)
                         if total_size > max_size_bytes:
                             raise ValueError(
-                                f"File too large. Max allowed is {MAX_FILE_SIZE_MB} MB"
+                                f"File too large. Max allowed is {DEFAULT_MAX_UPLOAD_FILE_SIZE_MB} MB"
                             )
                         f.write(chunk)
         except Exception as e:
@@ -304,6 +317,16 @@ def download_from_url(url: str) -> str:
                 logger.debug(f"Removed partial download: {local_path}")
             logger.error(f"Download failed: {e}")
             raise e
+
+    # Restrict permissions immediately — owner read/write only, never
+    # executable. Cheap hardening: even in the brief window before the
+    # scanner examines this file, it can't accidentally be run as a
+    # program, and nothing other than this app's own user account can
+    # read it. POSIX only; harmless no-op attempt on other platforms.
+    try:
+        os.chmod(local_path, 0o600)
+    except Exception as e:
+        logger.debug(f"Could not set restrictive permissions on {local_path}: {e}")
 
     if not is_supported_file(str(local_path)):
         local_path.unlink(missing_ok=True)
@@ -358,7 +381,7 @@ if __name__ == "__main__":
     )
     try:
         # path = get_file("https://example.com/sample.pdf")
-        path = get_file("/Users/amritanshudash/Downloads/FY26_Q1_Consolidated_Financial_Statements.pdf")
+        path = get_file("/Users/amritanshudash/Desktop/LedgerMind/data/raw/sec-edgar-filings/AAPL/10-K/0000320193-24-000123/full-submission.txt")
         print("✅ File ready at:", path)
     except Exception as e:
         print("❌ Error:", str(e))

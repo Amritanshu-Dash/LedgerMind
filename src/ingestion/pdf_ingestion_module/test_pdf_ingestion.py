@@ -2,7 +2,7 @@
 Test Script for pdf_ingestion.py
 """
 
-from pdf_ingestion import process_pdf
+from ingestion.pdf_ingestion_module.pdf_ingestion import process_pdf
 import logging
 
 # Configure logging only in the test file
