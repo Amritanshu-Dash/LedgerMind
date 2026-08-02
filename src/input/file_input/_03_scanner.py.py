@@ -4,27 +4,26 @@ scanner.py
 Malware / malicious-file guardian — the FIRST line of defense in LedgerMind.
 
 Purpose:
-Every uploaded file passes through here before the extractor or vision
-model ever touches it. Nothing downstream should trust a file that hasn't
-come back "safe" from this module.
+Every uploaded file passes through here before the extractor or vision model ever touches it. Nothing downstream should trust a file that hasn't come back "safe" from this module.
 
 Why this isn't just "run ClamAV and call it a day":
-A signature scanner (ClamAV or any other) can only catch malware that's already known and in its database. 
-That leaves real gaps:
+A signature scanner (ClamAV or any other) can only catch malware that's already known and in its database. That leaves real gaps:
   - Brand-new / custom-crafted malicious files (no signature exists yet).
-  - "Zip bombs" — a tiny DOCX/XLSX (which are just ZIP files under the hood) that decompresses into gigabytes and hangs or crashes whatever tries to unzip it downstream. This isn't "malware" a signature database would flag, but it can take your app down just as hard.
-  - Office documents with embedded macros — not always flagged by signatures, and we never need macros to read financial data anyway.
+  - "Zip bombs" — a tiny DOCX/XLSX (which are just ZIP files under the
+    hood) that decompresses into gigabytes and hangs or crashes whatever
+    tries to unzip it downstream. This isn't "malware" a signature
+    database would flag, but it can take your app down just as hard.
+  - Office documents with embedded macros — not always flagged by
+    signatures, and we never need macros to read financial data anyway.
   - PDFs with embedded JavaScript / launch actions — same story.
   - A file whose extension lies about what it actually is.
 So this module runs several independent layers, in order from cheapest to most expensive, and rejects at the first layer that fails. ClamAV is one layer among several, not the whole defense.
 
 Operational note:
-ClamAV's own signature database (layer below) is only useful if freshclam runs on its own schedule outside this app. A clean scan against a stale database is a false sense of security — this module cannot fix that,
-only remind you of it.
+ClamAV's own signature database (layer below) is only useful if freshclam runs on its own schedule outside this app. A clean scan against a stale database is a false sense of security — this module cannot fix that, only remind you of it.
 
 Fail-open vs fail-closed:
 Every exception this module raises means "reject the file." Callers must never catch one of these and let the file through anyway — that would defeat the entire point of having a guardian stage.
-
 """
 
 import logging               # structured logging instead of print()
@@ -37,6 +36,8 @@ from pathlib import Path      # safe, OS-independent path handling
 from shutil import which      # cheap check for whether clamscan is even on PATH
 from typing import Optional   # type hints so signatures are self-documenting
 
+from ._00_constants import DEFAULT_MAX_UPLOAD_FILE_SIZE_MB, SUPPORTED_FILE_MAGIC_BYTES
+
 logger = logging.getLogger(__name__)  # module-level logger tagged with this file's name
 
 
@@ -44,10 +45,12 @@ logger = logging.getLogger(__name__)  # module-level logger tagged with this fil
 # CONFIGURATION
 # ==============================
 # Every "how strict" knob lives here so tuning doesn't require touching logic.
+# Note: file size limit and supported file types now live in constants.py,
+# since both are shared with input.py / orchestrator.py — see that file
+# for why they moved out of here.
 
 DEFAULT_SCAN_TIMEOUT_SECONDS = 120     # ClamAV scan itself
 VERSION_CHECK_TIMEOUT_SECONDS = 10     # the lightweight "is clamscan alive" check
-DEFAULT_MAX_SIZE_MB = 50.0             # hard cap on the file as uploaded
 
 # Resource limits applied to the clamscan subprocess itself (POSIX only) —
 # defense in depth in case a crafted file somehow makes the scanner itself
@@ -60,21 +63,11 @@ MAX_ZIP_ENTRY_COUNT = 2000             # a normal Office file has dozens, not th
 MAX_ZIP_UNCOMPRESSED_TOTAL_MB = 500    # total size after decompression
 MAX_ZIP_COMPRESSION_RATIO = 100        # uncompressed / compressed — bombs are 1000x+
 
-# File types this scanner knows how to validate. Extend this if the
-# pipeline starts accepting new formats.
-MAGIC_BYTES = {
-    ".pdf": [b"%PDF"],
-    ".png": [b"\x89PNG\r\n\x1a\n"],
-    ".jpg": [b"\xff\xd8\xff"],
-    ".jpeg": [b"\xff\xd8\xff"],
-    ".bmp": [b"BM"],
-    ".webp": [b"RIFF"],  # full check also verifies "WEBP" at offset 8, see _verify_magic_bytes
-    ".docx": [b"PK\x03\x04"],
-    ".xlsx": [b"PK\x03\x04"],
-    ".pptx": [b"PK\x03\x04"],
-}
-ZIP_BASED_EXTENSIONS = {".docx", ".xlsx", ".pptx"}  # these get the zip-bomb + macro check
-ALLOWED_EXTENSIONS = set(MAGIC_BYTES.keys())
+
+# These formats get the zip-bomb + macro check (see _check_zip_safety).
+# Local to this file only — nothing else needs to know which extensions
+# happen to be ZIP-based under the hood.
+ZIP_BASED_EXTENSIONS = {".docx", ".xlsx", ".pptx"}
 
 
 # ==============================
@@ -117,10 +110,11 @@ class ScanResult:
 # like a harmless one.
 
 def _verify_magic_bytes(path: Path) -> None:
-    """Raises SuspiciousFileError if the file's real content doesn't match
-    its extension. Silent pass (returns None) if it matches."""
+    """
+    Raises SuspiciousFileError if the file's real content doesn't match its extension. Silent pass (returns None) if it matches.
+    """
     ext = path.suffix.lower()
-    if ext not in MAGIC_BYTES:
+    if ext not in SUPPORTED_FILE_MAGIC_BYTES:
         raise SuspiciousFileError(f"Unsupported file type: '{ext}'.")
 
     try:
@@ -129,7 +123,7 @@ def _verify_magic_bytes(path: Path) -> None:
     except Exception as e:
         raise SuspiciousFileError(f"Could not read file header: {e}")
 
-    if not any(header.startswith(sig) for sig in MAGIC_BYTES[ext]):
+    if not any(header.startswith(sig) for sig in SUPPORTED_FILE_MAGIC_BYTES[ext]):
         raise SuspiciousFileError(
             f"File content does not match its extension '{ext}' "
             f"(claims to be one type, is actually something else)."
@@ -149,8 +143,9 @@ def _verify_magic_bytes(path: Path) -> None:
 # macro we never need for reading financial data out of a document.
 
 def _check_zip_safety(path: Path) -> None:
-    """Raises SuspiciousFileError on a zip bomb or an embedded macro.
-    Only call this for files in ZIP_BASED_EXTENSIONS."""
+    """
+    Raises SuspiciousFileError on a zip bomb or an embedded macro. Only call this for files in ZIP_BASED_EXTENSIONS.
+    """
     try:
         with zipfile.ZipFile(path) as zf:
             entries = zf.infolist()
@@ -247,10 +242,7 @@ def is_clamav_available() -> bool:
     """
     Check if ClamAV (clamscan) is installed and responding.
 
-    Caching policy: once confirmed working, we trust that for the rest of
-    the process. We never cache a FAILURE — a one-time slow start or
-    transient hiccup should not permanently disable scanning for every
-    file for the rest of the process's life.
+    Caching policy: once confirmed working, we trust that for the rest of the process. We never cache a FAILURE — a one-time slow start or transient hiccup should not permanently disable scanning for every file for the rest of the process's life.
     """
     global _clamav_confirmed_working
 
@@ -279,12 +271,8 @@ def is_clamav_available() -> bool:
 
 def _apply_subprocess_resource_limits() -> None:
     """
-    Runs INSIDE the child process (via subprocess's preexec_fn) right after
-    fork, before clamscan's own code starts executing. Caps CPU time and
-    memory so that even a file crafted to make the scanner itself misbehave
-    can't hang or balloon the machine. POSIX only (macOS/Linux) — Windows
-    would need a different mechanism (e.g. a Job Object) not implemented
-    here.
+    Runs INSIDE the child process (via subprocess's preexec_fn) right after fork, before clamscan's own code starts executing. Caps CPU time and memory so that even a file crafted to make the scanner itself misbehave can't hang or balloon the machine. POSIX only (macOS/Linux) — Windows
+    would need a different mechanism (e.g. a Job Object) not implemented here.
     """
     import resource  # POSIX-only stdlib module; imported here so this file
                       # still imports cleanly on a platform without it
@@ -299,8 +287,9 @@ def _apply_subprocess_resource_limits() -> None:
 
 
 def _run_signature_scan(path: Path, timeout: int) -> None:
-    """Raises MalwareDetectedError, ScannerNotAvailableError, or RuntimeError.
-    Returns None on a clean scan."""
+    """
+    Raises MalwareDetectedError, ScannerNotAvailableError, or RuntimeError. Returns None on a clean scan.
+    """
     if not is_clamav_available():
         raise ScannerNotAvailableError(
             "ClamAV is not installed or not available. "
@@ -350,11 +339,10 @@ def _run_signature_scan(path: Path, timeout: int) -> None:
 # ==============================
 
 def _is_within_directory(path: Path, allowed_base_dir: Path) -> bool:
-    """True if `path` resolves to somewhere inside `allowed_base_dir`.
-    Guards against a symlink pointing outside the intended uploads
-    folder — Path.resolve() follows symlinks, so without this check we
-    could scan (and the pipeline later trust) a different file entirely
-    than the one that was actually uploaded."""
+    """
+    True if `path` resolves to somewhere inside `allowed_base_dir`. Guards against a symlink pointing outside the intended uploads folder — Path.resolve() follows symlinks, so without this check we could scan (and the pipeline later trust) a different file entirely
+    than the one that was actually uploaded.
+    """
     try:
         path.relative_to(allowed_base_dir)
         return True
@@ -369,19 +357,16 @@ def _is_within_directory(path: Path, allowed_base_dir: Path) -> bool:
 def scan_file(
     file_path: str,
     timeout: int = DEFAULT_SCAN_TIMEOUT_SECONDS,
-    max_size_mb: Optional[float] = DEFAULT_MAX_SIZE_MB,
+    max_size_mb: Optional[float] = DEFAULT_MAX_UPLOAD_FILE_SIZE_MB,
     allowed_base_dir: Optional[str] = None,
 ) -> ScanResult:
     """
-    Runs a file through every defensive layer, cheapest first, and stops
-    at the first one that fails. Only returns (a ScanResult) if every
-    layer passes — any failure raises instead, matching the fail-closed
-    contract described in the module docstring.
+    Runs a file through every defensive layer, cheapest first, and stops at the first one that fails. Only returns (a ScanResult) if every layer passes — any failure raises instead, matching the fail-closed contract described in the module docstring.
 
     Args:
         file_path: Absolute path of the file.
         timeout: Max seconds for the ClamAV scan step specifically.
-        max_size_mb: Hard cap on file size. Defaults to DEFAULT_MAX_SIZE_MB
+        max_size_mb: Hard cap on file size. Defaults to DEFAULT_MAX_UPLOAD_FILE_SIZE_MB
             so there is always a cap even if the caller forgets to pass one.
         allowed_base_dir: If given, the resolved path must live inside this
             directory. Strongly recommended — pass your uploads folder.
@@ -435,3 +420,37 @@ def scan_file(
 
     logger.info(f"File passed all layers ({', '.join(checks_passed)}): {path}")
     return ScanResult(status="safe", file=str(path), checks_passed=checks_passed)
+
+
+# ==============================
+# Quick Test
+# ==============================
+if __name__ == "__main__":
+    import tempfile
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+
+    print("=" * 60)
+    print("Testing scanner.py...")
+    print("=" * 60)
+    print(f"ClamAV available: {is_clamav_available()}")
+
+    # Self-contained test file — a valid PDF magic-byte header is enough to
+    # pass every structural layer here, no real PDF library needed just to
+    # prove the scanner's wiring works end to end.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        test_path = Path(tmp_dir) / "test_sample.pdf"
+        test_path.write_bytes(b"%PDF-1.4\n%%EOF")
+
+        try:
+            result = scan_file(str(test_path))
+            print(f"✅ Scan passed: {result}")
+        except ScannerNotAvailableError as e:
+            print(f"⚠️  ClamAV not available, could not complete the scan: {e}")
+        except (MalwareDetectedError, SuspiciousFileError) as e:
+            print(f"❌ Unexpected rejection of a clean test file: {e}")
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
