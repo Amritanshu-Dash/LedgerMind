@@ -76,9 +76,7 @@ def _find_project_root() -> Path:
 # ============================================================
 # RESULT TYPES
 # ============================================================
-# Structured results so the caller (and eventually the user-facing UI) can
-# distinguish "here is clean financial text" from "we skipped this one, and
-# here's why" without having to parse strings.
+# Structured results so the caller (and eventually the user-facing UI) can distinguish "here is clean financial text" from "we skipped this one, and here's why" without having to parse strings.
 
 @dataclass
 class ImageResult:
@@ -105,10 +103,7 @@ class VisionAnalysisResult:
 # ============================================================
 # STAGE 1 — PRE-MODEL VALIDATION
 # ============================================================
-# This is the cheap, fast, non-negotiable gate. Nothing reaches the model
-# unless it passes here. Note: your architecture already has a separate
-# malicious-file scanner earlier in the pipeline, so this function is NOT
-# trying to catch malware — its job is narrower: "is this a real, readable,
+# This is the cheap, fast, non-negotiable gate. Nothing reaches the model unless it passes here. Note: your architecture already has a separate malicious-file scanner earlier in the pipeline, so this function is NOT trying to catch malware — its job is narrower: "is this a real, readable,
 # reasonably-sized image file, or will it break / hang the model?"
 
 def _validate_image(path: Path) -> Optional[str]:
@@ -127,9 +122,7 @@ def _validate_image(path: Path) -> Optional[str]:
         return f"File too large ({size_mb:.1f}MB, limit is {MAX_FILE_SIZE_MB}MB)."
 
     try:
-        # img.verify() checks the file's internal structure is not corrupt
-        # WITHOUT fully decoding pixel data — cheap and catches most
-        # malformed/truncated/weird files before we spend real work on them.
+        # img.verify() checks the file's internal structure is not corrupt WITHOUT fully decoding pixel data — cheap and catches most malformed/truncated/weird files before we spend real work on them.
         with Image.open(path) as img:
             img.verify()
         # verify() leaves the file object unusable, so we must reopen to
@@ -150,13 +143,8 @@ def _validate_image(path: Path) -> Optional[str]:
 
 def _image_to_data_uri(path: Path) -> str:
     """
-    Encode the image as a base64 data URI. We deliberately do NOT pass a
-    file:// path to the model — depending on the llama-cpp-python version,
-    the LLaVA chat handler's image loader may silently fail to fetch
-    file:// URIs, which produces the "model answers as if no image was
-    given" symptom (near-empty or generic output with very low prompt
-    token counts). A data URI guarantees the exact bytes we validated above
-    are what the model actually sees.
+    Encode the image as a base64 data URI. We deliberately do NOT pass a file:// path to the model — depending on the llama-cpp-python version, the LLaVA chat handler's image loader may silently fail to fetch file:// URIs, which produces the "model answers as if no image was
+    given" symptom (near-empty or generic output with very low prompt token counts). A data URI guarantees the exact bytes we validated above are what the model actually sees.
     """
     ext = path.suffix.lower().lstrip(".")            # file extension without the leading dot
     mime = "jpeg" if ext == "jpg" else ext              # "jpg" isn't a valid MIME subtype, "jpeg" is
@@ -168,16 +156,9 @@ def _image_to_data_uri(path: Path) -> str:
 # ============================================================
 # STAGE 2 — THE PROMPT
 # ============================================================
-# Rebalanced from the previous version. The old prompt stacked FOUR
-# separate "do not invent / do not guess / be honest / accuracy over
-# completeness" instructions on top of each other. On a small quantized
-# model that pressure tends to produce near-empty output, because the
-# safest possible completion under that much warning is to say very
-# little. The fix here is to give the model one specific safe fallback per
-# field ("write 'not visible' if unsure") instead of a vague, repeated
-# threat about honesty in general — that gives it permission to still
-# produce a full, structured answer while keeping the same anti-
-# hallucination guarantee.
+# Rebalanced from the previous version. The old prompt stacked FOUR separate "do not invent / do not guess / be honest / accuracy over completeness" instructions on top of each other. On a small quantized model that pressure tends to produce near-empty output, because the
+# safest possible completion under that much warning is to say very little. The fix here is to give the model one specific safe fallback per field ("write 'not visible' if unsure") instead of a vague, repeated threat about honesty in general — that gives it permission to still
+# produce a full, structured answer while keeping the same anti-hallucination guarantee.
 
 VISION_SYSTEM_PROMPT = (  # sets the model's overall behaviour for every request, before the user prompt
     "You are a careful financial-document reading assistant. You transcribe "
@@ -213,30 +194,16 @@ name that is not visible in the image."""  # this exact string is sent to the mo
 # ============================================================
 # STAGE 3 — MODEL WORKER PROCESS (crash isolation)
 # ============================================================
-# This is the core of "should not crash the whole application." A segfault
-# inside llama.cpp / the CLIP image encoder cannot be caught by a Python
-# try/except — it kills the OS process it happens in, full stop. So instead
-# of running inference in the same process as the rest of the app, we run
-# it in a dedicated child process. If that child process dies (crash,
-# segfault, OOM-kill, anything), the parent process — which is what your
-# application actually runs in — is completely unaffected. The parent just
-# notices the worker is gone and restarts it.
+# This is the core of "should not crash the whole application." A segfault inside llama.cpp / the CLIP image encoder cannot be caught by a Python try/except — it kills the OS process it happens in, full stop. So instead of running inference in the same process as the rest of the app, 
+# we run it in a dedicated child process. If that child process dies (crash, segfault, OOM-kill, anything), the parent process — which is what your application actually runs in — is completely unaffected. The parent just notices the worker is gone and restarts it.
 #
-# Communication with the worker happens over two multiprocessing Queues:
-# one for requests going in, one for responses coming back. Every response
-# is tagged with a request id so we always know which request a reply
-# belongs to, even across a restart.
+# Communication with the worker happens over two multiprocessing Queues: one for requests going in, one for responses coming back. Every response is tagged with a request id so we always know which request a reply belongs to, even across a restart.
 
 def _model_worker_main(request_q: "mp.Queue", response_q: "mp.Queue") -> None:
     """
-    Entry point that runs INSIDE the child process. Loads the model once,
-    then sits in a loop handling one image at a time. This function must
-    never be called directly from the main process — only via
-    multiprocessing.Process(target=_model_worker_main, ...).
+    Entry point that runs INSIDE the child process. Loads the model once, then sits in a loop handling one image at a time. This function must never be called directly from the main process — only via multiprocessing.Process(target=_model_worker_main, ...).
     """
-    # Imports are done here, inside the child process, so that a failure to
-    # import llama_cpp (e.g. missing native library) only breaks the worker
-    # process, not the parent.
+    # Imports are done here, inside the child process, so that a failure to import llama_cpp (e.g. missing native library) only breaks the worker process, not the parent.
     from llama_cpp import Llama                                   # the low-level model runner
     from llama_cpp.llama_chat_format import Llava15ChatHandler    # adds image-input support to Llama
 
@@ -264,8 +231,7 @@ def _model_worker_main(request_q: "mp.Queue", response_q: "mp.Queue") -> None:
         # Signal to the parent that startup succeeded and we're ready for work.
         response_q.put(("__READY__", None, None))
     except Exception as e:
-        # If the model can't even load, tell the parent exactly why instead
-        # of just silently hanging — the parent is waiting on __READY__.
+        # If the model can't even load, tell the parent exactly why instead of just silently hanging — the parent is waiting on __READY__.
         response_q.put(("__STARTUP_FAILED__", None, f"{e}\n{traceback.format_exc()}"))
         return
 
@@ -301,19 +267,14 @@ def _model_worker_main(request_q: "mp.Queue", response_q: "mp.Queue") -> None:
             content = result["choices"][0]["message"]["content"].strip()  # pull the text out of the response
             response_q.put((request_id, content, None))  # (id, result, no error) back to the parent
         except Exception as e:
-            # A normal Python-level failure during inference (bad response
-            # shape, OOM raised as an exception rather than a hard crash,
-            # etc). Report it back rather than letting the worker die.
+            # A normal Python-level failure during inference (bad response shape, OOM raised as an exception rather than a hard crash, etc). Report it back rather than letting the worker die.
             response_q.put((request_id, None, f"{e}\n{traceback.format_exc()}"))
 
 
 class _ModelWorkerManager:
     """
-    Owns the lifecycle of the model worker process: starting it, sending it
-    work, reading results back with a timeout, and restarting it if it dies
-    (whether from a clean shutdown, an exception, or a native crash).
-    This class is intentionally the ONLY thing in this file that touches
-    multiprocessing directly — everything else just calls .run_inference().
+    Owns the lifecycle of the model worker process: starting it, sending it work, reading results back with a timeout, and restarting it if it dies (whether from a clean shutdown, an exception, or a native crash).
+    This class is intentionally the ONLY thing in this file that touches multiprocessing directly — everything else just calls .run_inference().
     """
 
     def __init__(self) -> None:
@@ -362,10 +323,7 @@ class _ModelWorkerManager:
 
     def run_inference(self, data_uri: str) -> str:
         """
-        Runs one image through the model. Raises RuntimeError with a clear
-        message on any failure (timeout, crash, load failure) rather than
-        ever letting an exception from the worker process propagate in a
-        confusing way. Restarts the worker automatically if it died.
+        Runs one image through the model. Raises RuntimeError with a clear message on any failure (timeout, crash, load failure) rather than ever letting an exception from the worker process propagate in a confusing way. Restarts the worker automatically if it died.
         """
         last_error: Optional[str] = None  # keeps the most recent failure reason across retries
 
@@ -385,8 +343,7 @@ class _ModelWorkerManager:
                     timeout=MODEL_INFERENCE_TIMEOUT_SECONDS
                 )
             except queue.Empty:
-                # The worker hung, or crashed hard enough that it never even
-                # put a response on the queue. Kill it and retry fresh.
+                # The worker hung, or crashed hard enough that it never even put a response on the queue. Kill it and retry fresh.
                 logger.warning("Vision model worker timed out — restarting it.")
                 self._kill_worker()
                 last_error = f"Model inference timed out after {MODEL_INFERENCE_TIMEOUT_SECONDS}s."
@@ -436,12 +393,8 @@ def analyze_images(image_paths: List[str]) -> VisionAnalysisResult:
       - .accepted  -> images that were financial content, with extracted text
       - .rejected  -> images that were skipped, with a human-readable reason
 
-    This function is designed to never raise for "expected" bad input (bad
-    files, non-financial images, one image failing among many). It can
-    still raise RuntimeError if the model itself is fundamentally unusable
-    (e.g. model files missing) — that is treated as a setup problem worth
-    surfacing loudly rather than silently swallowing, since it means EVERY
-    image in the batch would fail the same way.
+    This function is designed to never raise for "expected" bad input (bad files, non-financial images, one image failing among many). It can still raise RuntimeError if the model itself is fundamentally unusable (e.g. model files missing) — that is treated as a setup problem worth
+    surfacing loudly rather than silently swallowing, since it means EVERY image in the batch would fail the same way.
     """
     result = VisionAnalysisResult()  # empty accepted/rejected lists to fill in below
 
@@ -471,10 +424,7 @@ def analyze_images(image_paths: List[str]) -> VisionAnalysisResult:
             data_uri = _image_to_data_uri(path)               # encode bytes for the model
             raw_output = _worker_manager.run_inference(data_uri)  # send to the worker process, wait for result
         except Exception as e:
-            # Model-level failure for THIS image only — log it, record it as
-            # a rejection with the error as the reason, and keep going with
-            # the rest of the batch. One bad image must never stop the
-            # others from being processed.
+            # Model-level failure for THIS image only — log it, record it as a rejection with the error as the reason, and keep going with the rest of the batch. One bad image must never stop the others from being processed.
             logger.error("Vision model failed on %s: %s", path.name, e)
             result.rejected.append(
                 ImageResult(
@@ -511,7 +461,9 @@ def analyze_images(image_paths: List[str]) -> VisionAnalysisResult:
 
 
 def shutdown_vision_model() -> None:
-    """Call this on application shutdown to cleanly stop the worker process."""
+    """
+    Call this on application shutdown to cleanly stop the worker process.
+    """
     _worker_manager.shutdown()
 
 

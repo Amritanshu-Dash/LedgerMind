@@ -4,18 +4,16 @@ extractor.py
 Content extraction stage — the second real step of the pipeline (after input.py receives the file and scanner.py confirms it's safe).
 
 Purpose:
-Pulls out everything useful from a document: normal text directly wherethat's trustworthy, and anything image-based or layout-complex (charts, scanned receipts, dense tables) via a call out to the vision model.
+Pulls out everything useful from a document: normal text directly where that's trustworthy, and anything image-based or layout-complex (charts, scanned receipts, dense tables) via a call out to the vision model.
 Returns one combined result per file.
 
 Design goals:
-1. Never throw away good work because of a partial failure. If normal text extraction succeeds but the vision model fails on the images, the caller should still get the normal text back, with a clear note that
-   image analysis didn't complete — not nothing at all.
+1. Never throw away good work because of a partial failure. If normal text extraction succeeds but the vision model fails on the images, the caller should still get the normal text back, with a clear note that image analysis didn't complete — not nothing at all.
 2. Hard caps on pages/images/text length, enforced HERE, not just trusted to whatever cap the vision model happens to have.
-3. Don't blindly trust raw text extraction on every page. Complex layouts (dense tables, multi-column financial statements, heavily-drawn pages) often extract as garbled or scrambled text even though no literal
-   embedded image is present. Per project decision, this extractor errs toward routing a page to the vision model whenever ANY unusual layout signal shows up — favoring accuracy over the extra vision-model calls
-   that costs, since the model runs locally rather than as a paid API. 
-   Known limitation: this page-render heuristic currently only applies to PDFs. DOCX tables are still handled via python-docx's own paragraph/ image extraction — a future improvement would read doc.tables directly
-   (python-docx exposes table cells structurally, no vision model needed for those at all), but that's not implemented yet.
+3. Don't blindly trust raw text extraction on every page. Complex layouts (dense tables, multi-column financial statements, heavily-drawn pages) often extract as garbled or scrambled text even though no literal embedded image is present. Per project decision, this extractor errs
+   toward routing a page to the vision model whenever ANY unusual layout signal shows up — favoring accuracy over the extra vision-model calls that costs, since the model runs locally rather than as a paid API.
+   Known limitation: this page-render heuristic currently only applies to PDFs. DOCX tables are still handled via python-docx's own paragraph/ image extraction — a future improvement would read doc.tables directly (python-docx exposes table cells structurally, no vision model needed
+   for those at all), but that's not implemented yet.
 4. Match whatever the currently active vision model module actually returns — a structured VisionAnalysisResult (accepted / rejected images), not a plain string.
 """
 
@@ -31,15 +29,12 @@ from PIL import Image                # decodes embedded image bytes before re-sa
 
 # ============================================================
 # VISION MODEL SWITCH
-# Just comment / uncomment the model you want to use. NOTE: every module
-# swapped in here must return the same VisionAnalysisResult shape (see
-# vision_model.py) — every call site below assumes .accepted / .rejected
-# lists, not a plain string.
+# Just comment / uncomment the model you want to use. NOTE: every module swapped in here must return the same VisionAnalysisResult shape (see vision_model.py) — every call site below assumes .accepted / .rejected lists, not a plain string.
 # ============================================================
 
 # from .vision_model import analyze_images                  
 # from .vision_model_florence import analyze_images
-from .vision_model_llava import analyze_images
+from .vision_model_llava import analyze_images                  # ← Currently Active (MiniCPM-V)
 # from .vision_model_moondream import analyze_images
 # from .vision_model_qwen import analyze_images
 
@@ -57,10 +52,8 @@ MAX_IMAGES_PER_DOCUMENT = 25          # covers both embedded images AND full-pag
 MAX_EXTRACTED_TEXT_CHARS = 2_000_000  # ~2MB of text; well beyond any real financial document
 MAX_TXT_FILE_SIZE_MB = 10.0           # independent safety net for plain text files
 
-# Page layout-complexity thresholds. Deliberately set LOW/loose — per
-# project decision, false positives (sending an actually-simple page to
-# the vision model) are preferred over false negatives (trusting garbled
-# text from a complex page).
+# Page layout-complexity thresholds. Deliberately set LOW/loose — per project decision, false positives (sending an actually-simple page to the vision model) are preferred over false negatives (trusting garbled text from a complex page).
+
 COMPLEX_DRAWING_THRESHOLD = 3         # this many vector lines/rects on a page suggests a drawn table
 COMPLEX_TEXT_BLOCK_THRESHOLD = 8      # this many separate text blocks suggests multi-column/table layout
 COMPLEX_MAX_AVG_WORDS_PER_LINE = 3    # tables tend to have short, sparse lines (cell values, not sentences)
@@ -69,9 +62,9 @@ PAGE_RENDER_DPI = 200                 # resolution for full-page renders sent to
 
 
 class ExtractionError(Exception):
-    """Raised when content extraction fails outright (unreadable/corrupt
-    file, unsupported type, etc). NOT raised just because the vision model
-    had trouble with some images — see _run_vision_model for why."""
+    """
+    Raised when content extraction fails outright (unreadable/corrupt file, unsupported type, etc). NOT raised just because the vision model had trouble with some images — see _run_vision_model for why.
+    """
     pass
 
 
@@ -110,9 +103,7 @@ def extract_content(file_path: str) -> Dict[str, Any]:
     except ExtractionError:
         raise  # already a clean, specific error — don't wrap it again
     except Exception as e:
-        # Anything unexpected (corrupt file, library-level failure, etc) —
-        # convert to our own exception type so callers only ever need to
-        # catch one thing, but log the real cause for debugging.
+        # Anything unexpected (corrupt file, library-level failure, etc) — convert to our own exception type so callers only ever need to catch one thing, but log the real cause for debugging.
         logger.error(f"Extraction failed for {path.name}: {e}")
         raise ExtractionError(f"Failed to extract content: {str(e)}")
 
@@ -152,12 +143,11 @@ def _run_vision_model(image_paths: List[str]) -> Dict[str, Any]:
 
 def _page_has_complex_layout(page: "fitz.Page") -> bool:
     """
-    Heuristic: decide whether a page's raw text extraction is untrustworthy enough to route the whole page to the vision model instead. Tuned to err toward flagging pages as complex — a false positive just costs one
-    extra (local, free) vision-model call; a false negative means silently feeding garbled table data into a financial prediction.
+    Heuristic: decide whether a page's raw text extraction is untrustworthy enough to route the whole page to the vision model instead. Tuned to err toward flagging pages as complex — a false positive just costs one extra (local, free) vision-model call; 
+    a false negative means silently feeding garbled table data into a financial prediction.
     """
     try:
-        # Signal 1: heavily hand-drawn content (lines/rects) is a strong
-        # sign of a table rendered as vector graphics rather than real text.
+        # Signal 1: heavily hand-drawn content (lines/rects) is a strong sign of a table rendered as vector graphics rather than real text.
         drawings = page.get_drawings()
         if len(drawings) >= COMPLEX_DRAWING_THRESHOLD:
             return True
@@ -165,13 +155,11 @@ def _page_has_complex_layout(page: "fitz.Page") -> bool:
         text_dict = page.get_text("dict")
         text_blocks = [b for b in text_dict.get("blocks", []) if b.get("type") == 0]
 
-        # Signal 2: many separate text blocks suggests a multi-column or
-        # grid layout rather than flowing paragraphs.
+        # Signal 2: many separate text blocks suggests a multi-column or grid layout rather than flowing paragraphs.
         if len(text_blocks) >= COMPLEX_TEXT_BLOCK_THRESHOLD:
             return True
 
-        # Signal 3: lots of short lines (few words each) is typical of
-        # table cell values rather than normal sentences.
+        # Signal 3: lots of short lines (few words each) is typical of table cell values rather than normal sentences.
         line_word_counts = []
         for block in text_blocks:
             for line in block.get("lines", []):
@@ -188,14 +176,15 @@ def _page_has_complex_layout(page: "fitz.Page") -> bool:
 
         return False
     except Exception as e:
-        # If we can't even analyze the layout, treat it as complex rather
-        # than silently trusting text we never actually checked.
+        # If we can't even analyze the layout, treat it as complex rather than silently trusting text we never actually checked.
         logger.warning(f"Layout complexity check failed, defaulting to vision model: {e}")
         return True
 
 
 def _render_page_to_image(page: "fitz.Page", temp_dir: Path, page_number: int) -> Optional[str]:
-    """Renders a full page to a PNG for the vision model. Returns the temp path, or None if rendering fails — a render failure should never take down the whole extraction, just fall back to raw text for that page."""
+    """
+    Renders a full page to a PNG for the vision model. Returns the temp path, or None if rendering fails — a render failure should never take down the whole extraction, just fall back to raw text for that page.
+    """
     try:
         pix = page.get_pixmap(dpi=PAGE_RENDER_DPI)
         temp_path = temp_dir / f"page_render_{page_number}.png"
@@ -225,17 +214,14 @@ def _extract_pdf(path: Path) -> Dict[str, Any]:
                 complex_layout = _page_has_complex_layout(page)
 
                 if complex_layout:
-                    # Untrustworthy text extraction — prefer a full-page
-                    # render over the raw (possibly scrambled) text.
+                    # Untrustworthy text extraction — prefer a full-page render over the raw (possibly scrambled) text.
                     rendered_path = None
                     if len(image_paths) < MAX_IMAGES_PER_DOCUMENT:
                         rendered_path = _render_page_to_image(page, temp_dir, page_number)
                         if rendered_path:
                             image_paths.append(rendered_path)
                     if rendered_path is None:
-                        # Rendering failed or we're over the image cap —
-                        # fall back to raw text rather than losing the page
-                        # entirely.
+                        # Rendering failed or we're over the image cap — fall back to raw text rather than losing the page entirely.
                         text = page.get_text("text").strip()
                         if text:
                             normal_text_parts.append(text)
@@ -245,9 +231,7 @@ def _extract_pdf(path: Path) -> Dict[str, Any]:
                     if text:
                         normal_text_parts.append(text)
 
-                    # Still pull any literal embedded pictures on an
-                    # otherwise-simple page (e.g. a logo or a small photo
-                    # sitting next to normal paragraphs).
+                    # Still pull any literal embedded pictures on an otherwise-simple page (e.g. a logo or a small photo sitting next to normal paragraphs).
                     if len(image_paths) < MAX_IMAGES_PER_DOCUMENT:
                         for img in page.get_images(full=True):
                             if len(image_paths) >= MAX_IMAGES_PER_DOCUMENT:
@@ -295,9 +279,7 @@ def _extract_docx(path: Path) -> Dict[str, Any]:
         for rel in doc.part.rels.values():
             if len(image_paths) >= MAX_IMAGES_PER_DOCUMENT:
                 break
-            # Check the actual content type of the related part rather than
-            # just string-matching the target path — more reliable, since
-            # a target path could contain "image" without actually being one.
+            # Check the actual content type of the related part rather than just string-matching the target path — more reliable, since a target path could contain "image" without actually being one.
             content_type = getattr(rel.target_part, "content_type", "")
             if not content_type.startswith("image/"):
                 continue
@@ -328,9 +310,7 @@ def _extract_docx(path: Path) -> Dict[str, Any]:
 
 
 def _extract_txt(path: Path) -> Dict[str, Any]:
-    # Independent size safety net — see the note in the module docstring
-    # about the current mismatch between this and scanner.py's allowed
-    # types (worth resolving one way or the other).
+    # Independent size safety net — see the note in the module docstring about the current mismatch between this and scanner.py's allowed types (worth resolving one way or the other).
     size_mb = path.stat().st_size / (1024 * 1024)
     if size_mb > MAX_TXT_FILE_SIZE_MB:
         raise ExtractionError(f"Text file too large ({size_mb:.2f}MB). Max: {MAX_TXT_FILE_SIZE_MB}MB")
@@ -364,9 +344,9 @@ def _extract_image(path: Path) -> Dict[str, Any]:
 
 
 def _cap_text_length(text: str) -> str:
-    """Truncates extracted text to a sane hard ceiling. Prevents an
-    unusually large document from producing a multi-megabyte string that
-    flows uncapped into the cache DB / model prompt downstream."""
+    """
+    Truncates extracted text to a sane hard ceiling. Prevents an unusually large document from producing a multi-megabyte string that flows uncapped into the cache DB / model prompt downstream.
+    """
     if len(text) > MAX_EXTRACTED_TEXT_CHARS:
         logger.warning(
             "Extracted text length %d exceeds cap %d, truncating.",
@@ -383,3 +363,38 @@ def _combine_text(normal_text: str, vision_text: str) -> str:
     if vision_text:
         parts.append("\n\n--- Content from Images ---\n\n" + vision_text)
     return "\n\n".join(parts).strip()
+
+
+# ==============================
+# Quick Test
+# ==============================
+if __name__ == "__main__":
+    import tempfile
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+
+    print("=" * 60)
+    print("Testing extractor.py...")
+    print("=" * 60)
+
+    # Self-contained .txt test — no external sample file needed, just
+    # confirms the extractor's own wiring (dispatch by extension, text
+    # capping, return shape) works.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        test_path = Path(tmp_dir) / "test_sample.txt"
+        test_path.write_text("This is a test financial note: total due $123.45.")
+
+        try:
+            result = extract_content(str(test_path))
+            print(f"✅ Extraction succeeded, file_type={result['file_type']}")
+            print(f"   Text: {result['text']}")
+        except ExtractionError as e:
+            print(f"❌ Extraction failed: {e}")
+
+    # Exercising the PDF/DOCX/image branches (and therefore the vision
+    # model) needs a real sample file — change this path and uncomment:
+    # real_test_path = "/path/to/your/sample.pdf"
+    # print(extract_content(real_test_path))

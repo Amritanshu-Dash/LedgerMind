@@ -214,7 +214,9 @@ _PDF_DANGEROUS_MARKERS = [
 
 
 def _check_pdf_safety(path: Path) -> None:
-    """Raises SuspiciousFileError if the PDF contains active-content markers."""
+    """
+    Raises SuspiciousFileError if the PDF contains active-content markers.
+    """
     try:
         with open(path, "rb") as f:
             content = f.read()  # PDFs in this pipeline are capped by MAX_SIZE anyway
