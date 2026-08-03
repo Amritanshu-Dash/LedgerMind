@@ -4,19 +4,19 @@ vision_model.py
 Vision Model Implementation using LLaVA 1.6 (Mistral 7B - 4-bit)
 
 Purpose:
-This module looks at images pulled out of financial documents (PDFs, DOCX, screenshots, charts, tables, receipts, etc.) and turns them into clean, accurate text. It is the ONLY part of the pipeline that decides whether 
-an image is worth reading at all — everything else downstream (validator, main-DB, model prediction) assumes what this file hands over is either "clean financial text" or "explicitly rejected, with a reason."
+This module looks at images pulled out of financial documents (PDFs, DOCX, screenshots, charts, tables, receipts, etc.) and turns them into clean, accurate text. It is the ONLY part of the pipeline that decides whether an image is worth reading at all — everything else 
+downstream (validator, main-DB, model prediction) assumes what this file hands over is either "clean financial text" or "explicitly rejected, with a reason."
 
 Design goals (in priority order):
 
-1. NEVER take the whole application down with it. Not on a bad image, not on a corrupted file, not even if the underlying C++ model backend segfaults.
-   This is why model inference runs in a separate worker PROCESS, not just a try/except in this process — a segfault in llama.cpp cannot be caught by Python's exception handling because it kills the process it happens in.
-   By putting the model in its own process, a crash there just means we restart that process; the app calling this module never goes down.
+1.  NEVER take the whole application down with it. Not on a bad image, not on a corrupted file, not even if the underlying C++ model backend segfaults.
+    This is why model inference runs in a separate worker PROCESS, not just a try/except in this process — a segfault in llama.cpp cannot be caught by Python's exception handling because it kills the process it happens in.
+    By putting the model in its own process, a crash there just means we restart that process; the app calling this module never goes down.
 
-2. Reject anything that isn't a financial document BEFORE it reaches the model, and reject anything that IS finance-adjacent nonsense (cats, dogs, cars, random screenshots) with a clear, user-facing reason. We would
-   rather say "skipped: this looks like a photo of a dog" than silently process it or silently ignore it.
+2.  Reject anything that isn't a financial document BEFORE it reaches the model, and reject anything that IS finance-adjacent nonsense (cats, dogs, cars, random screenshots) with a clear, user-facing reason. We would rather say "skipped: this looks like a photo of a dog" 
+    than silently process it or silently ignore it.
 
-3. Extract text/numbers/tables faithfully. Prefer "not visible" over a guess. A guess that looks confident is worse than an honest gap, because this text eventually feeds a company's financial prediction.
+3.  Extract text/numbers/tables faithfully. Prefer "not visible" over a guess. A guess that looks confident is worse than an honest gap, because this text eventually feeds a company's financial prediction.
 
 Why LLaVA 1.6 + llama-cpp-python?
 - Runs fully offline on Apple Silicon (M1/M2/M3) using Metal.
@@ -60,11 +60,8 @@ MAX_WORKER_RESTARTS_PER_CALL = 2       # if the worker keeps dying, stop trying 
 
 def _find_project_root() -> Path:
     """
-    Walk upward from this file until we find a folder that contains
-    'models'. This is intentionally NOT run at import time (see bottom of
-    file) — if the models folder is missing on some machine, importing this
-    module should not itself crash the whole application; only actually
-    trying to run the vision model should surface that error.
+    Walk upward from this file until we find a folder that contains 'models'. This is intentionally NOT run at import time (see bottom of file) — if the models folder is missing on some machine, importing this
+    module should not itself crash the whole application; only actually trying to run the vision model should surface that error.
     """
     current = Path(__file__).resolve()          # absolute path to this file itself
     for parent in current.parents:               # walk upward: this file's folder, then its parent, etc
@@ -80,7 +77,9 @@ def _find_project_root() -> Path:
 
 @dataclass
 class ImageResult:
-    """One image's outcome — whether it was accepted or rejected, and why."""
+    """
+    One image's outcome — whether it was accepted or rejected, and why.
+    """
     image_path: str           # which file this result belongs to
     accepted: bool             # True if it was financial and got processed, False if skipped
     reason: str                 # human-readable explanation of the outcome, shown to the user
@@ -89,14 +88,16 @@ class ImageResult:
 
 @dataclass
 class VisionAnalysisResult:
-    """The full outcome of one analyze_images() call across every image passed in."""
+    """
+    The full outcome of one analyze_images() call across every image passed in.
+    """
     accepted: List[ImageResult] = field(default_factory=list)  # every image that was financial content
     rejected: List[ImageResult] = field(default_factory=list)  # every image skipped, with a reason each
 
     def combined_text(self) -> str:
-        """Convenience: just the extracted text from accepted images, for
-        callers (like the Analyser stage) that only care about the content
-        and not the per-image bookkeeping."""
+        """
+        Convenience: just the extracted text from accepted images, for callers (like the Analyser stage) that only care about the content and not the per-image bookkeeping.
+        """
         return "\n\n".join(r.extracted_text for r in self.accepted if r.extracted_text)
 
 
@@ -308,7 +309,9 @@ class _ModelWorkerManager:
         # tag == "__READY__" means we're good to go.
 
     def _kill_worker(self) -> None:
-        """Forcefully terminate whatever's left of a dead/misbehaving worker."""
+        """
+        Forcefully terminate whatever's left of a dead/misbehaving worker.
+        """
         if self._process is not None and self._process.is_alive():
             self._process.terminate()      # ask the OS to stop the process
             self._process.join(timeout=5)  # wait briefly for it to actually exit
@@ -367,7 +370,9 @@ class _ModelWorkerManager:
         )
 
     def shutdown(self) -> None:
-        """Clean shutdown, e.g. on application exit."""
+        """
+        Clean shutdown, e.g. on application exit.
+        """
         if self._process is not None and self._process.is_alive():
             try:
                 self._request_q.put((None, None))  # tells the worker loop to exit cleanly

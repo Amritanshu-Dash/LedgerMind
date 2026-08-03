@@ -22,13 +22,13 @@ from uuid import uuid4                    # ties an archived original and its re
 
 from ._00_constants import DEFAULT_MAX_UPLOAD_FILE_SIZE_MB, TEMP_DOWNLOAD_DIRECTORY_PATH
 from ._02_input import get_file, cleanup_old_temp_files
-from .scanner import (
+from ._03_scanner import (
     scan_file,
     MalwareDetectedError,
     ScannerNotAvailableError,
     SuspiciousFileError,
 )
-from .extractor import extract_content, ExtractionError
+from ._04_extractor import extract_content, ExtractionError
 
 logger = logging.getLogger(__name__)      # module-level logger tagged with this file's name
 
