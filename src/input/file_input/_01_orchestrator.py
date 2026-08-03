@@ -271,7 +271,7 @@ if __name__ == "__main__":
     )
 
     # Change this path to a real file on your system
-    test_input = "/Users/amritanshudash/Downloads/sample.pdf"   # ← Change this
+    test_input = "/Users/amritanshudash/Desktop/LedgerMind/data/EX-21.1.pdf"   # ← Change this
 
     try:
         output = process_file(test_input)

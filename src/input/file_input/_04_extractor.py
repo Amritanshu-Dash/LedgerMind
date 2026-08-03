@@ -34,7 +34,7 @@ from PIL import Image                # decodes embedded image bytes before re-sa
 
 # from .vision_model import analyze_images                  
 # from .vision_model_florence import analyze_images
-from .vision_model_llava import analyze_images                  # ← Currently Active (MiniCPM-V)
+from ._05_vision_model_llava import analyze_images                  # ← Currently Active (MiniCPM-V)
 # from .vision_model_moondream import analyze_images
 # from .vision_model_qwen import analyze_images
 
