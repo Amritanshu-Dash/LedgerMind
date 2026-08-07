@@ -76,7 +76,9 @@ ZIP_BASED_EXTENSIONS = {".docx", ".xlsx", ".pptx"}
 # Every one of these means the same thing to a caller: reject the file.
 
 class MalwareDetectedError(Exception):
-    """Raised when a signature scan (ClamAV) flags the file as infected."""
+    """
+    Raised when a signature scan (ClamAV) flags the file as infected.
+    """
     pass
 
 
@@ -96,7 +98,9 @@ class ScannerNotAvailableError(Exception):
 
 @dataclass
 class ScanResult:
-    """Outcome of a full scan_file() call."""
+    """
+    Outcome of a full scan_file() call.
+    """
     status: str          # always "safe" — anything else raises instead of returning
     file: str            # the resolved path that was scanned
     checks_passed: list  # names of every layer this file passed, for logging/audit
@@ -278,14 +282,24 @@ def _apply_subprocess_resource_limits() -> None:
     """
     import resource  # POSIX-only stdlib module; imported here so this file
                       # still imports cleanly on a platform without it
-    resource.setrlimit(
-        resource.RLIMIT_CPU,
-        (CLAMSCAN_CPU_LIMIT_SECONDS, CLAMSCAN_CPU_LIMIT_SECONDS),
-    )
-    resource.setrlimit(
-        resource.RLIMIT_AS,
-        (CLAMSCAN_MEMORY_LIMIT_MB * 1024 * 1024, CLAMSCAN_MEMORY_LIMIT_MB * 1024 * 1024),
-    )
+
+    try:
+        resource.setrlimit(
+            resource.RLIMIT_CPU,
+            (CLAMSCAN_CPU_LIMIT_SECONDS, CLAMSCAN_CPU_LIMIT_SECONDS),
+        )
+
+    except (ValueError, OSError):
+        pass # not fatal — the scan's own timeout still bounds wall-clock time
+
+    try:
+        resource.setrlimit(
+            resource.RLIMIT_AS,
+            (CLAMSCAN_MEMORY_LIMIT_MB * 1024 * 1024, CLAMSCAN_MEMORY_LIMIT_MB * 1024 * 1024),
+        )
+    except (ValueError, OSError):
+        pass  # RLIMIT_AS is unreliable when set from a forked Python
+              # process on macOS — see the earlier explanation. Best-effort.
 
 
 def _run_signature_scan(path: Path, timeout: int) -> None:

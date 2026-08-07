@@ -18,5 +18,6 @@ docx
 llama-cpp-python
 huggingface_hub
 clamav
+postgresql@16
 
 /* CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --force-reinstall --no-cache-dir */
