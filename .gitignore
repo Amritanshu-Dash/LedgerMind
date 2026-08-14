@@ -29,3 +29,7 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb_checkpoints
+# Large model & vector files
+vision_models/
+vector_db/
+*.gguf

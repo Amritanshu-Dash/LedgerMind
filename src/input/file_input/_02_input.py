@@ -27,7 +27,7 @@ import ipaddress                       # checks resolved IPs against private/loo
 import logging                         # structured logging instead of print()
 import mimetypes                       # guesses a file extension from Content-Type as a last resort
 import os                              # used for file permission checks (os.access)
-import socket                          # resolves hostnames to IPs for the SSRF check
+import socket                          # resolves host names to IPs for the SSRF check
 import time                            # tracks elapsed download time against the timeout
 from datetime import datetime, timedelta   # temp-file age tracking for cleanup
 from email.message import Message      # parses Content-Disposition header safely

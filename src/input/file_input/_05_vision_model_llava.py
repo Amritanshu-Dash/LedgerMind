@@ -60,12 +60,12 @@ MAX_WORKER_RESTARTS_PER_CALL = 2       # if the worker keeps dying, stop trying 
 
 def _find_project_root() -> Path:
     """
-    Walk upward from this file until we find a folder that contains 'models'. This is intentionally NOT run at import time (see bottom of file) — if the models folder is missing on some machine, importing this
+    Walk upward from this file until we find a folder that contains 'vision_models'. This is intentionally NOT run at import time (see bottom of file) — if the vision_models folder is missing on some machine, importing this
     module should not itself crash the whole application; only actually trying to run the vision model should surface that error.
     """
     current = Path(__file__).resolve()          # absolute path to this file itself
     for parent in current.parents:               # walk upward: this file's folder, then its parent, etc
-        if (parent / "models").exists():         # found the folder that holds the model weights
+        if (parent / "vision_models").exists():         # found the folder that holds the model weights
             return parent
     raise RuntimeError("Could not find project root containing 'models' folder")
 
@@ -210,8 +210,8 @@ def _model_worker_main(request_q: "mp.Queue", response_q: "mp.Queue") -> None:
 
     llm = None  # holds the loaded model once ready; stays None if load fails
     try:
-        project_root = _find_project_root()                                      # locate models/ folder
-        model_path = project_root / "models" / "llava-v1.6-mistral-7b.Q4_K_M.gguf"  # the main LLM weights
+        project_root = _find_project_root()                                      # locate vision_models/ folder
+        model_path = project_root / "vision_models" / "llava-v1.6-mistral-7b.Q4_K_M.gguf"  # the main LLM weights
         mmproj_path = project_root / "models" / "mmproj-model-f16.gguf"             # the vision projector weights
 
         if not model_path.exists():
