@@ -1,54 +1,44 @@
 """
 _01_cache_repository.py
 ------------------------
-All the actual read/write operations against cache_data.
+All the actual read/write operations against the cache_data table.
 
-Location: src/database/cache_database/database_handlers/_01_cache_repository.py
+Location:
+    src/database/cache_database/database_handlers/_01_cache_repository.py
 
-Access model, per project decision:
-- Read functions (get, list/search) need nothing beyond a normal database
-  connection — anyone with DB access can look. No extra password.
-- Write functions that change state — approve/reject, delete, promote to
-  the main DB — require a separate admin action password, checked here
-  in Python, on top of the normal DB connection.
+Access rules (project decision):
+- Reading data  → no extra password needed
+- Changing data (approve / reject / delete / promote) → requires the admin password
 
-Honest limitation, stated rather than hidden: this admin password is a
-soft guard appropriate for a solo local project, not real per-user
-authentication. A stronger version would use real Postgres roles — a
-reasonable future upgrade, not built now.
+Important:
+This admin password is only a soft local protection.
+It is NOT real multi-user security. Later we can upgrade to real Postgres roles.
 
-Two rules genuinely NOT just trusted to this file, enforced by the
-database itself (see migrations/0002_cache_data_guardrails.sql):
-- A row can only be deleted while data_review_status = 'rejected'.
-- Any row that isn't 'pending' must have a non-empty reviewed_by.
-This file's own checks for those two rules are a fast, friendly first
-line of defense; the database constraints/triggers are the real
-guarantee, and will refuse the operation even if this file's checks were
-somehow bypassed.
+Two rules are enforced by the DATABASE itself (see migration 0002):
+1. You can only delete a row when its status is 'rejected'
+2. Any row that is not 'pending' must have a non-empty reviewed_by
+
+The checks in this file are just a friendly early warning.
+The database is the final authority.
 """
 
-import json                                       # validates extracted_data is JSON-serializable before sending it
-import logging                                    # structured logging instead of print()
-import secrets                                    # secrets.compare_digest() — constant-time string comparison,
-                                                   # so checking the admin password doesn't leak timing information
-                                                   # an attacker could theoretically use to guess it character by
-                                                   # character. Low real-world risk for a solo local project, but
-                                                   # a one-line fix with no downside, worth doing correctly.
-from dataclasses import dataclass                 # lightweight structured result object
-from typing import Any, Dict, List, Optional       # type hints so signatures are self-documenting
+import json
+import logging
+import secrets
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-import psycopg                                    # needed for psycopg's own error types
+import psycopg
+from psycopg.types.json import Json
 
 from ._00_connection import get_connection, get_admin_password
 
-logger = logging.getLogger(__name__)              # module-level logger tagged with this file's name
+logger = logging.getLogger(__name__)
 
+# Allowed values for data_review_status
 VALID_REVIEW_STATUSES = {"pending", "approved", "rejected"}
-VALID_MAIN_DB_STATUSES = {"requested", "accepted", "rejected"}
 
-# Match the real VARCHAR limits from migrations/0001 exactly — checked
-# here BEFORE ever sending to Postgres, so a too-long name fails with a
-# clear message instead of a raw database error.
+# These match the real column limits in the database
 MAX_COMPANY_NAME_LENGTH = 150
 MAX_COMPANY_STOCK_NAME_LENGTH = 50
 
@@ -58,59 +48,87 @@ MAX_COMPANY_STOCK_NAME_LENGTH = 50
 # ==============================
 
 class IncorrectAdminPasswordError(Exception):
-    """Raised when a mutating action is attempted with the wrong (or missing) admin password."""
+    """Wrong or missing admin password was given for a protected action."""
     pass
 
 
 class DocumentNotFoundError(Exception):
-    """Raised when an operation references a document id that doesn't exist."""
+    """The document id does not exist in the table."""
     pass
 
 
 class InvalidStatusError(Exception):
-    """Raised when asked to set or filter by a status outside the allowed set."""
+    """Someone tried to use a status value that is not allowed."""
     pass
 
 
 class MissingReviewerError(Exception):
-    """Raised when trying to set a non-pending status without naming a reviewer —
-    mirrors the database's own reviewer_required_when_reviewed constraint,
-    but catches the mistake here with a clearer message before it ever
-    reaches Postgres."""
+    """Tried to approve or reject a document without giving a reviewer name."""
     pass
 
 
 class InvalidDocumentDataError(Exception):
-    """Raised when data handed to insert_cache_document() is invalid before
-    it's ever sent to the database — too long for its column, or not
-    something that can be turned into JSON at all."""
+    """Data given to insert is invalid (empty, too long, or not JSON-serializable)."""
     pass
 
 
 class InvalidDocumentIdError(Exception):
-    """Raised when a document_id isn't a real, positive integer — catches
-    a caller mistake (None, a string, a negative number) with a clear
-    message instead of a confusing 'not found' from a query that could
-    never have matched anything."""
+    """document_id is not a positive integer."""
     pass
 
 
+class CacheDataOperationError(Exception):
+    """
+    A database operation failed for a reason that is NOT a connection problem
+    and is not one of the more specific errors above.
+    This stops the error from being wrongly reported as "lost connection".
+    """
+    pass
+
+
+class StatusChangeConflictError(Exception):
+    """
+    Could not change the review status because of the main_db_status
+    constraint. This can mean either:
+    - the document is currently being promoted ('requested'), or
+    - it has already been fully confirmed in the main DB ('accepted'/'rejected')
+      and can no longer be changed through this path.
+    """
+    pass
+
+
+class DeleteNotAllowedError(Exception):
+    """
+    Tried to delete a document that is not in 'rejected' status.
+    The database trigger blocks this, and we turn it into a clear error.
+    """
+    pass
+
+
+# ==============================
+# Small helper functions
+# ==============================
+
 def _require_admin_password(password: Optional[str]) -> None:
-    """Shared guard called at the top of every mutating function below."""
-    expected = get_admin_password()  # raises RuntimeError if not configured
-    # secrets.compare_digest instead of != — see the import comment above
-    # for why. Needs both sides to be strings; a None password (caller
-    # forgot to pass one) is treated as simply wrong, not a crash.
+    """
+    Checks the admin password.
+    Uses constant-time comparison so timing attacks are harder
+    (even though this is only a local project).
+    """
+    expected = get_admin_password()
     if not secrets.compare_digest(password or "", expected):
         raise IncorrectAdminPasswordError("Incorrect admin password for this action.")
 
 
 def _require_valid_document_id(document_id: Any) -> int:
-    """Shared guard: confirms document_id is actually a positive integer
-    before it's used in any query. Called at the top of every function
-    that operates on a specific existing document."""
+    """
+    Makes sure document_id is a real positive integer.
+    Stops bad values (None, string, 0, negative) early with a clear message.
+    """
     if not isinstance(document_id, int) or isinstance(document_id, bool) or document_id <= 0:
-        raise InvalidDocumentIdError(f"document_id must be a positive integer. Got: {document_id!r}")
+        raise InvalidDocumentIdError(
+            f"document_id must be a positive integer. Got: {document_id!r}"
+        )
     return document_id
 
 
@@ -120,7 +138,7 @@ def _require_valid_document_id(document_id: Any) -> int:
 
 @dataclass
 class CacheDocument:
-    """One row from cache_data, as a structured result instead of a raw tuple."""
+    """One row from cache_data, turned into a nice Python object."""
     id: int
     company_name: str
     company_stock_name: str
@@ -138,8 +156,7 @@ class CacheDocument:
     updated_at: Any
 
 
-# Every SELECT below asks for columns in this exact order, so _row_to_document
-# only has to know the order once instead of repeating it everywhere.
+# Columns we always select, in this exact order
 _SELECT_COLUMNS = (
     "id, company_name, company_stock_name, extracted_data, file_path, original_filename, "
     "data_review_status, reviewed_by, reviewed_at, "
@@ -149,8 +166,7 @@ _SELECT_COLUMNS = (
 
 
 def _row_to_document(row: dict) -> CacheDocument:
-    """row is a dict now (row_factory=dict_row), keyed by column name — no
-    positional index to keep in sync with the SELECT column order."""
+    """Turns a database row (dict) into a CacheDocument object."""
     return CacheDocument(
         id=row["id"],
         company_name=row["company_name"],
@@ -171,7 +187,7 @@ def _row_to_document(row: dict) -> CacheDocument:
 
 
 # ==============================
-# Insert (no admin password required)
+# INSERT (no admin password needed)
 # ==============================
 
 def insert_cache_document(
@@ -182,103 +198,131 @@ def insert_cache_document(
     original_filename: Optional[str] = None,
 ) -> int:
     """
-    Inserts a newly-extracted document as 'pending'. No admin password —
-    adding new pending data isn't the kind of action the password guard
-    is meant to gate; only changing/removing existing data is.
-
-    company_name/company_stock_name currently come from the file/folder
-    name at call time (manual, per project decision) — proper structured
-    extraction of these fields is future work for the analyser stage.
-
-    extracted_data holds the FULL dict extract_content() returns —
-    text, normal_text, vision_text, images_found, images_rejected,
-    rejection_reasons, all of it — stored as-is in the JSONB column.
-
+    Inserts a newly extracted document with status = 'pending'.
     Returns the new row's id.
     """
-    if not company_name or not company_name.strip():
+
+    # Clean the strings first
+    company_name = (company_name or "").strip()
+    company_stock_name = (company_stock_name or "").strip()
+    file_path = (file_path or "").strip()
+
+    # Basic validation
+    if not company_name:
         raise InvalidDocumentDataError("company_name cannot be empty.")
     if len(company_name) > MAX_COMPANY_NAME_LENGTH:
         raise InvalidDocumentDataError(
-            f"company_name is {len(company_name)} chars, max is {MAX_COMPANY_NAME_LENGTH}."
+            f"company_name is {len(company_name)} characters long. Maximum allowed is {MAX_COMPANY_NAME_LENGTH}."
         )
-    if not company_stock_name or not company_stock_name.strip():
+
+    if not company_stock_name:
         raise InvalidDocumentDataError("company_stock_name cannot be empty.")
     if len(company_stock_name) > MAX_COMPANY_STOCK_NAME_LENGTH:
         raise InvalidDocumentDataError(
-            f"company_stock_name is {len(company_stock_name)} chars, max is {MAX_COMPANY_STOCK_NAME_LENGTH}."
+            f"company_stock_name is {len(company_stock_name)} characters long. Maximum allowed is {MAX_COMPANY_STOCK_NAME_LENGTH}."
         )
 
+    if not file_path:
+        raise InvalidDocumentDataError("file_path cannot be empty.")
+
+    # Make sure the data can actually be turned into JSON
     try:
-        # psycopg.types.json.Json() wraps the dict so psycopg knows to
-        # serialize it as JSON for the JSONB column, rather than trying
-        # to send a raw Python dict (which it can't). The actual
-        # serialization normally happens lazily when the query runs — we
-        # force it here first, with the plain standard-library json
-        # module, purely to catch a non-serializable value (a datetime,
-        # raw bytes) early with a clear message, before it ever reaches
-        # psycopg or the database.
         json.dumps(extracted_data)
     except TypeError as e:
-        raise InvalidDocumentDataError(f"extracted_data is not JSON-serializable: {e}") from e
+        raise InvalidDocumentDataError(
+            f"extracted_data contains values that cannot be converted to JSON: {e}"
+        ) from e
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO cache_data
-                    (company_name, company_stock_name, extracted_data, file_path, original_filename)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id;
-                """,
-                (
-                    company_name,
-                    company_stock_name,
-                    psycopg.types.json.Json(extracted_data),
-                    file_path,
-                    original_filename,
-                ),
-            )
-            new_id = cur.fetchone()["id"]  # autocommit=True already made this durable
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO cache_data (
+                        company_name,
+                        company_stock_name,
+                        extracted_data,
+                        file_path,
+                        original_filename
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id;
+                    """,
+                    (
+                        company_name,
+                        company_stock_name,
+                        Json(extracted_data),
+                        file_path,
+                        original_filename,
+                    ),
+                )
+            except psycopg.Error as e:
+                raise CacheDataOperationError(f"Failed to insert cache document: {e}") from e
+
+            new_id = cur.fetchone()["id"]
+
     logger.info(f"Inserted cache document {new_id} for {company_name} ({file_path})")
     return new_id
 
 
 # ==============================
-# Read (no password required)
+# READ functions (no password needed)
 # ==============================
 
 def get_document(document_id: int) -> CacheDocument:
-    """Fetch one document by id."""
+    """Fetch one document by its id."""
     document_id = _require_valid_document_id(document_id)
+
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT {_SELECT_COLUMNS} FROM cache_data WHERE id = %s;", (document_id,))
-            row = cur.fetchone()
+            try:
+                cur.execute(
+                    f"SELECT {_SELECT_COLUMNS} FROM cache_data WHERE id = %s;",
+                    (document_id,),
+                )
+                row = cur.fetchone()
+            except psycopg.Error as e:
+                raise CacheDataOperationError(
+                    f"Failed to fetch cache document {document_id}: {e}"
+                ) from e
+
     if row is None:
         raise DocumentNotFoundError(f"No cache document with id {document_id}")
+
     return _row_to_document(row)
 
 
 def list_documents(status: Optional[str] = None) -> List[CacheDocument]:
-    """List/search documents, optionally filtered by data_review_status."""
+    """
+    List documents.
+    If status is given, only return documents with that data_review_status.
+    """
     with get_connection() as conn:
         with conn.cursor() as cur:
-            if status is not None:
-                if status not in VALID_REVIEW_STATUSES:
-                    raise InvalidStatusError(f"'{status}' is not valid. Allowed: {sorted(VALID_REVIEW_STATUSES)}")
-                cur.execute(
-                    f"SELECT {_SELECT_COLUMNS} FROM cache_data WHERE data_review_status = %s ORDER BY created_at DESC;",
-                    (status,),
-                )
-            else:
-                cur.execute(f"SELECT {_SELECT_COLUMNS} FROM cache_data ORDER BY created_at DESC;")
-            rows = cur.fetchall()
+            try:
+                if status is not None:
+                    if status not in VALID_REVIEW_STATUSES:
+                        raise InvalidStatusError(
+                            f"'{status}' is not a valid status. Allowed values: {sorted(VALID_REVIEW_STATUSES)}"
+                        )
+                    cur.execute(
+                        f"SELECT {_SELECT_COLUMNS} FROM cache_data "
+                        f"WHERE data_review_status = %s ORDER BY created_at DESC;",
+                        (status,),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT {_SELECT_COLUMNS} FROM cache_data ORDER BY created_at DESC;"
+                    )
+                rows = cur.fetchall()
+            except psycopg.Error as e:
+                raise CacheDataOperationError(f"Failed to list cache documents: {e}") from e
+
     return [_row_to_document(r) for r in rows]
 
 
 # ==============================
-# Write (admin password required)
+# WRITE functions (admin password required)
 # ==============================
 
 def update_review_status(
@@ -289,19 +333,27 @@ def update_review_status(
     comments: Optional[str] = None,
 ) -> CacheDocument:
     """
-    Changes a document's data_review_status — the "data manipulation"
-    the project rules specifically call out as needing the admin
-    password. reviewed_by is required for anything other than 'pending' —
-    checked here first for a clear error message, and enforced again by
-    the database's own CHECK constraint regardless.
+    Changes the data_review_status of a document (pending → approved / rejected).
+    Requires the admin password.
     """
-    if new_status not in VALID_REVIEW_STATUSES:
-        raise InvalidStatusError(f"'{new_status}' is not valid. Allowed: {sorted(VALID_REVIEW_STATUSES)}")
-    if new_status != "pending" and not (reviewed_by and reviewed_by.strip()):
-        raise MissingReviewerError("reviewed_by is required when setting status to 'approved' or 'rejected'.")
-    document_id = _require_valid_document_id(document_id)
-    reviewed_by = reviewed_by.strip() if reviewed_by else reviewed_by  # store cleanly, no stray whitespace
+    # 1. Authenticate first — before revealing any validation details
     _require_admin_password(admin_password)
+
+    # 2. Basic validation
+    if new_status not in VALID_REVIEW_STATUSES:
+        raise InvalidStatusError(
+            f"'{new_status}' is not a valid status. Allowed values: {sorted(VALID_REVIEW_STATUSES)}"
+        )
+
+    document_id = _require_valid_document_id(document_id)
+
+    # 3. Reviewer is required when leaving 'pending'
+    if new_status != "pending" and not (reviewed_by and reviewed_by.strip()):
+        raise MissingReviewerError(
+            "reviewed_by is required when setting status to 'approved' or 'rejected'."
+        )
+
+    reviewed_by = reviewed_by.strip() if reviewed_by else reviewed_by
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -309,30 +361,44 @@ def update_review_status(
                 cur.execute(
                     """
                     UPDATE cache_data
-                    SET data_review_status = %s, reviewed_by = %s, comments = COALESCE(%s, comments)
+                    SET
+                        data_review_status = %s,
+                        reviewed_by = %s,
+                        comments = COALESCE(%s, comments)
                     WHERE id = %s
-                    RETURNING id;
+                    RETURNING *;
                     """,
                     (new_status, reviewed_by, comments, document_id),
                 )
             except psycopg.errors.CheckViolation as e:
-                # Under autocommit, a failed statement simply has no
-                # effect — nothing pending to roll back before the next
-                # statement can run.
-                raise MissingReviewerError(str(e)) from e
-            result = cur.fetchone()
-            if result is None:
+                # This can mean two different things:
+                # - main_db_status = 'requested'  → currently being promoted (temporary)
+                # - main_db_status = 'accepted'/'rejected' → already finished (permanent)
+                raise StatusChangeConflictError(
+                    "This document's status cannot be changed right now. "
+                    "It is either currently being sent to the main DB (try again shortly) "
+                    "or has already been permanently confirmed there (in which case it can no longer be changed)."
+                ) from e
+            except psycopg.Error as e:
+                raise CacheDataOperationError(
+                    f"Failed to update review status for document {document_id}: {e}"
+                ) from e
+
+            row = cur.fetchone()
+            if row is None:
                 raise DocumentNotFoundError(f"No cache document with id {document_id}")
-    logger.info(f"Cache document {document_id} data_review_status changed to '{new_status}' by {reviewed_by}")
-    return get_document(document_id)
+
+    logger.info(
+        f"Cache document {document_id} status changed to '{new_status}' by {reviewed_by}"
+    )
+    return _row_to_document(row)
 
 
 def delete_document(document_id: int, admin_password: str) -> None:
     """
-    Deletes a document. Only actually succeeds if data_review_status =
-    'rejected' — the database trigger enforces this regardless of what
-    this function does; the check here just gives a clearer, faster
-    error message for the common case.
+    Deletes a document.
+    Only works if the document is currently in 'rejected' status.
+    The database trigger enforces this rule.
     """
     _require_admin_password(admin_password)
     document_id = _require_valid_document_id(document_id)
@@ -342,77 +408,107 @@ def delete_document(document_id: int, admin_password: str) -> None:
             try:
                 cur.execute("DELETE FROM cache_data WHERE id = %s;", (document_id,))
             except psycopg.errors.RaiseException as e:
-                # This is the database TRIGGER refusing the delete — a
-                # non-rejected row was targeted. Nothing was committed,
-                # nothing to roll back.
-                raise ValueError(str(e)) from e
+                raise DeleteNotAllowedError(
+                    f"Cannot delete document {document_id}. "
+                    "Only documents with status 'rejected' can be deleted."
+                ) from e
+            except psycopg.Error as e:
+                raise CacheDataOperationError(
+                    f"Failed to delete cache document {document_id}: {e}"
+                ) from e
+
             if cur.rowcount == 0:
                 raise DocumentNotFoundError(f"No cache document with id {document_id}")
+
     logger.info(f"Cache document {document_id} deleted.")
 
 
-def promote_approved_documents(admin_password: str) -> List[int]:
+def promote_approved_documents(admin_password: str) -> Dict[str, List[Any]]:
     """
-    Finds every 'approved' document that hasn't been sent toward the main
-    DB yet (main_db_status IS NULL), and moves it through the two real
-    states your schema defines: 'requested' (the call is being made),
-    then 'accepted' or 'rejected' (the outcome).
+    Finds every approved document that still needs to be sent to the main DB
+    and moves it through the two steps: 'requested' → 'accepted'.
 
-    The main DB doesn't exist yet, so for now this SIMULATES a successful
-    call — every row goes 'requested' then 'accepted', with a placeholder
-    print statement standing in for the real call. This is the ONE place
-    that changes once the main DB exists: the print statement becomes a
-    real call, and main_db_status gets set to 'accepted' or 'rejected'
-    based on what actually happened, not hardcoded to succeed. Keeping
-    the request/resolve steps separate now (rather than one combined
-    update) means that seam is already in exactly the right place.
+    Also picks up rows that got stuck in 'requested' from a previous crash
+    (self-healing).
 
-    Returns the list of document ids that were promoted.
+    Returns:
+        {
+            "promoted": [list of ids that succeeded],
+            "skipped":  [(id, reason), ...]
+        }
     """
     _require_admin_password(admin_password)
 
-    promoted_ids = []
+    promoted_ids: List[int] = []
+    skipped: List[Any] = []
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM cache_data "
-                f"WHERE data_review_status = 'approved' AND main_db_status IS NULL;"
+                f"WHERE data_review_status = 'approved' "
+                f"AND (main_db_status IS NULL OR main_db_status = 'requested');"
             )
             rows = cur.fetchall()
 
         for row in rows:
             doc = _row_to_document(row)
 
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE cache_data SET main_db_status = 'requested', main_db_requested_at = now() WHERE id = %s;",
-                    (doc.id,),
-                )
-            # autocommit=True already made the 'requested' state durable
-            # here — if the process crashed before the next line ran,
-            # that fact wouldn't be lost.
+            # Step 1: mark as 'requested'
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE cache_data
+                        SET main_db_status = 'requested',
+                            main_db_requested_at = now()
+                        WHERE id = %s;
+                        """,
+                        (doc.id,),
+                    )
+            except psycopg.errors.CheckViolation as e:
+                logger.warning(f"Skipping document {doc.id}: no longer eligible ({e})")
+                skipped.append((doc.id, "no longer approved"))
+                continue
 
-            # ---- PLACEHOLDER: this is where the real main DB call goes ----
-            print(f"[main DB placeholder] Would send document {doc.id} ({doc.company_name}) to the main DB.")
-            # -----------------------------------------------------------------
+            # ---- PLACEHOLDER for the real main-DB call ----
+            print(f"[main DB placeholder] Would send document {doc.id} ({doc.company_name})")
+            # ------------------------------------------------
 
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE cache_data SET main_db_status = 'accepted', main_db_resolved_at = now() WHERE id = %s;",
-                    (doc.id,),
+            # Step 2: mark as 'accepted'
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE cache_data
+                        SET main_db_status = 'accepted',
+                            main_db_resolved_at = now()
+                        WHERE id = %s;
+                        """,
+                        (doc.id,),
+                    )
+            except psycopg.errors.CheckViolation as e:
+                logger.warning(
+                    f"Document {doc.id}: status changed during promotion, left as 'requested'"
                 )
+                skipped.append((doc.id, "status changed mid-promotion"))
+                continue
 
             promoted_ids.append(doc.id)
-            logger.info(f"Promoted cache document {doc.id} (placeholder — main DB not built yet).")
+            logger.info(f"Promoted cache document {doc.id}")
 
-    return promoted_ids
+    return {"promoted": promoted_ids, "skipped": skipped}
 
 
 # ==============================
-# Quick Test
+# Quick self-test
 # ==============================
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
     print("=" * 60)
     print("Testing cache_repository.py...")
@@ -421,18 +517,28 @@ if __name__ == "__main__":
     new_id = insert_cache_document(
         company_name="Test Company Inc",
         company_stock_name="TEST",
-        extracted_data={"text": "Total due: $123.45", "images_found": 0, "images_rejected": 0, "rejection_reasons": []},
+        extracted_data={
+            "text": "Total due: $123.45",
+            "images_found": 0,
+            "images_rejected": 0,
+            "rejection_reasons": [],
+        },
         file_path="/tmp/test_document.txt",
         original_filename="test_document.txt",
     )
     print(f"✅ Inserted test document: {new_id}")
 
     doc = get_document(new_id)
-    print(f"✅ Fetched it back, status = {doc.data_review_status}, main_db_status = {doc.main_db_status}")
+    print(f"✅ Fetched it back — status = {doc.data_review_status}")
 
     admin_pw = get_admin_password()
-    doc = update_review_status(new_id, "rejected", reviewed_by="Amritanshu", admin_password=admin_pw)
+    doc = update_review_status(
+        new_id,
+        "rejected",
+        reviewed_by="Amritanshu",
+        admin_password=admin_pw,
+    )
     print(f"✅ Status updated to '{doc.data_review_status}' by {doc.reviewed_by}")
 
     delete_document(new_id, admin_password=admin_pw)
-    print(f"✅ Deleted test document {new_id} (it was rejected, so this should succeed)")
+    print(f"✅ Deleted test document {new_id}")
