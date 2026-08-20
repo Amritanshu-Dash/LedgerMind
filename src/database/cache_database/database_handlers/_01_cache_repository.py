@@ -7,7 +7,7 @@ Location:
     src/database/cache_database/database_handlers/_01_cache_repository.py
 
 Access rules (project decision):
-- Reading data  → no extra password needed
+- Reading data → no extra password needed
 - Changing data (approve / reject / delete / promote) → requires the admin password
 
 Important:
@@ -16,7 +16,7 @@ It is NOT real multi-user security. Later we can upgrade to real Postgres roles.
 
 Two rules are enforced by the DATABASE itself (see migration 0002):
 1. You can only delete a row when its status is 'rejected'
-2. Any row that is not 'pending' must have a non-empty reviewed_by
+2. Any row that is not in a system-only state must have a non-empty reviewed_by when required
 
 The checks in this file are just a friendly early warning.
 The database is the final authority.
@@ -35,12 +35,24 @@ from ._00_connection import get_connection, get_admin_password
 
 logger = logging.getLogger(__name__)
 
-# Allowed values for data_review_status
-VALID_REVIEW_STATUSES = {"pending", "approved", "rejected"}
+# -------------------------------------------------
+# Statuses
+# -------------------------------------------------
+# system-ingested → only the extraction code can set this (on first insert)
+# in_progress     → user is reviewing / working on the document
+# approved        → user approved it
+# rejected        → user rejected it
+VALID_REVIEW_STATUSES = {"system-ingested", "in_progress", "approved", "rejected"}
+
+# Users are never allowed to set this status
+SYSTEM_ONLY_STATUS = "system-ingested"
 
 # These match the real column limits in the database
 MAX_COMPANY_NAME_LENGTH = 150
 MAX_COMPANY_STOCK_NAME_LENGTH = 50
+
+# Default comment used when the system first inserts a document
+SYSTEM_INGEST_COMMENT = "System extracted and ingested the document data."
 
 
 # ==============================
@@ -79,8 +91,7 @@ class InvalidDocumentIdError(Exception):
 
 class CacheDataOperationError(Exception):
     """
-    A database operation failed for a reason that is NOT a connection problem
-    and is not one of the more specific errors above.
+    A database operation failed for a reason that is NOT a connection problem and is not one of the more specific errors above.
     This stops the error from being wrongly reported as "lost connection".
     """
     pass
@@ -88,11 +99,10 @@ class CacheDataOperationError(Exception):
 
 class StatusChangeConflictError(Exception):
     """
-    Could not change the review status because of the main_db_status
-    constraint. This can mean either:
+    Could not change the review status because of the main_db_status constraint. 
+    This can mean either:
     - the document is currently being promoted ('requested'), or
-    - it has already been fully confirmed in the main DB ('accepted'/'rejected')
-      and can no longer be changed through this path.
+    - it has already been fully confirmed in the main DB ('accepted'/'rejected') and can no longer be changed through this path.
     """
     pass
 
@@ -105,6 +115,22 @@ class DeleteNotAllowedError(Exception):
     pass
 
 
+class MissingCommentError(Exception):
+    """
+    Tried to change a document's status without providing a comment.
+    Comments are required for every user-driven status change.
+    """
+    pass
+
+
+class SystemStatusNotAllowedError(Exception):
+    """
+    A user tried to set the status to 'system-ingested'.
+    Only the extraction code is allowed to use this status.
+    """
+    pass
+
+
 # ==============================
 # Small helper functions
 # ==============================
@@ -112,8 +138,7 @@ class DeleteNotAllowedError(Exception):
 def _require_admin_password(password: Optional[str]) -> None:
     """
     Checks the admin password.
-    Uses constant-time comparison so timing attacks are harder
-    (even though this is only a local project).
+    Uses constant-time comparison so timing attacks are harder.
     """
     expected = get_admin_password()
     if not secrets.compare_digest(password or "", expected):
@@ -144,7 +169,7 @@ class CacheDocument:
     company_stock_name: str
     extracted_data: Dict[str, Any]
     file_path: str
-    original_filename: Optional[str]
+    original_filename: str
     data_review_status: str
     reviewed_by: Optional[str]
     reviewed_at: Any
@@ -195,35 +220,42 @@ def insert_cache_document(
     company_stock_name: str,
     extracted_data: Dict[str, Any],
     file_path: str,
-    original_filename: Optional[str] = None,
+    original_filename: str,
 ) -> int:
     """
-    Inserts a newly extracted document with status = 'pending'.
-    Returns the new row's id.
-    """
+    Inserts a newly extracted document.
 
+    This is the ONLY place that is allowed to use the status 'system-ingested'.
+    A fixed system comment is also written so we always know this row was created by the extraction code.
+    """
     # Clean the strings first
     company_name = (company_name or "").strip()
     company_stock_name = (company_stock_name or "").strip()
     file_path = (file_path or "").strip()
+    original_filename = (original_filename or "").strip()
 
     # Basic validation
     if not company_name:
         raise InvalidDocumentDataError("company_name cannot be empty.")
     if len(company_name) > MAX_COMPANY_NAME_LENGTH:
         raise InvalidDocumentDataError(
-            f"company_name is {len(company_name)} characters long. Maximum allowed is {MAX_COMPANY_NAME_LENGTH}."
+            f"company_name is {len(company_name)} characters long. "
+            f"Maximum allowed is {MAX_COMPANY_NAME_LENGTH}."
         )
 
     if not company_stock_name:
         raise InvalidDocumentDataError("company_stock_name cannot be empty.")
     if len(company_stock_name) > MAX_COMPANY_STOCK_NAME_LENGTH:
         raise InvalidDocumentDataError(
-            f"company_stock_name is {len(company_stock_name)} characters long. Maximum allowed is {MAX_COMPANY_STOCK_NAME_LENGTH}."
+            f"company_stock_name is {len(company_stock_name)} characters long. "
+            f"Maximum allowed is {MAX_COMPANY_STOCK_NAME_LENGTH}."
         )
 
     if not file_path:
         raise InvalidDocumentDataError("file_path cannot be empty.")
+
+    if not original_filename:
+        raise InvalidDocumentDataError("original_filename cannot be empty.")
 
     # Make sure the data can actually be turned into JSON
     try:
@@ -243,9 +275,11 @@ def insert_cache_document(
                         company_stock_name,
                         extracted_data,
                         file_path,
-                        original_filename
+                        original_filename,
+                        data_review_status,
+                        comments
                     )
-                    VALUES (%s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id;
                     """,
                     (
@@ -254,6 +288,8 @@ def insert_cache_document(
                         Json(extracted_data),
                         file_path,
                         original_filename,
+                        SYSTEM_ONLY_STATUS,          # only the system can set this
+                        SYSTEM_INGEST_COMMENT,       # clear system comment
                     ),
                 )
             except psycopg.Error as e:
@@ -261,7 +297,10 @@ def insert_cache_document(
 
             new_id = cur.fetchone()["id"]
 
-    logger.info(f"Inserted cache document {new_id} for {company_name} ({file_path})")
+    logger.info(
+        f"Inserted cache document {new_id} for {company_name} "
+        f"with status '{SYSTEM_ONLY_STATUS}' ({file_path})"
+    )
     return new_id
 
 
@@ -303,7 +342,8 @@ def list_documents(status: Optional[str] = None) -> List[CacheDocument]:
                 if status is not None:
                     if status not in VALID_REVIEW_STATUSES:
                         raise InvalidStatusError(
-                            f"'{status}' is not a valid status. Allowed values: {sorted(VALID_REVIEW_STATUSES)}"
+                            f"'{status}' is not a valid status. "
+                            f"Allowed values: {sorted(VALID_REVIEW_STATUSES)}"
                         )
                     cur.execute(
                         f"SELECT {_SELECT_COLUMNS} FROM cache_data "
@@ -330,25 +370,45 @@ def update_review_status(
     new_status: str,
     reviewed_by: Optional[str],
     admin_password: str,
-    comments: Optional[str] = None,
+    comments: str,
 ) -> CacheDocument:
     """
-    Changes the data_review_status of a document (pending → approved / rejected).
-    Requires the admin password.
+    Changes the data_review_status of a document.
+
+    Rules:
+    - Admin password is required.
+    - Users are never allowed to set status to 'system-ingested'.
+    - A comment is required for every user-driven status change.
+    - reviewed_by is required when moving to 'approved' or 'rejected'.
     """
-    # 1. Authenticate first — before revealing any validation details
+    # 1. Authenticate first
     _require_admin_password(admin_password)
 
-    # 2. Basic validation
+    # 2. Block users from setting the system-only status
+    if new_status == SYSTEM_ONLY_STATUS:
+        raise SystemStatusNotAllowedError(
+            f"Status '{SYSTEM_ONLY_STATUS}' can only be set by the system "
+            "during the initial insert. Users cannot set this status."
+        )
+
+    # 3. Basic validation
     if new_status not in VALID_REVIEW_STATUSES:
         raise InvalidStatusError(
-            f"'{new_status}' is not a valid status. Allowed values: {sorted(VALID_REVIEW_STATUSES)}"
+            f"'{new_status}' is not a valid status. "
+            f"Allowed values: {sorted(VALID_REVIEW_STATUSES)}"
         )
 
     document_id = _require_valid_document_id(document_id)
 
-    # 3. Reviewer is required when leaving 'pending'
-    if new_status != "pending" and not (reviewed_by and reviewed_by.strip()):
+    # 4. Comment is required for every user status change
+    comments = (comments or "").strip()
+    if not comments:
+        raise MissingCommentError(
+            "comments is required whenever a user changes the status."
+        )
+
+    # 5. Reviewer is required when approving or rejecting
+    if new_status in ("approved", "rejected") and not (reviewed_by and reviewed_by.strip()):
         raise MissingReviewerError(
             "reviewed_by is required when setting status to 'approved' or 'rejected'."
         )
@@ -364,20 +424,18 @@ def update_review_status(
                     SET
                         data_review_status = %s,
                         reviewed_by = %s,
-                        comments = COALESCE(%s, comments)
+                        comments = %s
                     WHERE id = %s
                     RETURNING *;
                     """,
                     (new_status, reviewed_by, comments, document_id),
                 )
             except psycopg.errors.CheckViolation as e:
-                # This can mean two different things:
-                # - main_db_status = 'requested'  → currently being promoted (temporary)
-                # - main_db_status = 'accepted'/'rejected' → already finished (permanent)
                 raise StatusChangeConflictError(
                     "This document's status cannot be changed right now. "
                     "It is either currently being sent to the main DB (try again shortly) "
-                    "or has already been permanently confirmed there (in which case it can no longer be changed)."
+                    "or has already been permanently confirmed there "
+                    "(in which case it can no longer be changed)."
                 ) from e
             except psycopg.Error as e:
                 raise CacheDataOperationError(
@@ -529,14 +587,28 @@ if __name__ == "__main__":
     print(f"✅ Inserted test document: {new_id}")
 
     doc = get_document(new_id)
-    print(f"✅ Fetched it back — status = {doc.data_review_status}")
+    print(f"✅ Status after insert = {doc.data_review_status}")
+    print(f"✅ System comment      = {doc.comments}")
 
     admin_pw = get_admin_password()
+
+    # Move it to in_progress
+    doc = update_review_status(
+        new_id,
+        "in_progress",
+        reviewed_by="Amritanshu",
+        admin_password=admin_pw,
+        comments="Started reviewing the extracted data.",
+    )
+    print(f"✅ Status updated to '{doc.data_review_status}'")
+
+    # Reject it
     doc = update_review_status(
         new_id,
         "rejected",
         reviewed_by="Amritanshu",
         admin_password=admin_pw,
+        comments="Test rejection — verifying the new status rules.",
     )
     print(f"✅ Status updated to '{doc.data_review_status}' by {doc.reviewed_by}")
 
