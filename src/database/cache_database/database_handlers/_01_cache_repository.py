@@ -368,7 +368,7 @@ def list_documents(status: Optional[str] = None) -> List[CacheDocument]:
 def update_review_status(
     document_id: int,
     new_status: str,
-    reviewed_by: Optional[str],
+    reviewed_by: str,
     admin_password: str,
     comments: str,
 ) -> CacheDocument:
@@ -379,7 +379,9 @@ def update_review_status(
     - Admin password is required.
     - Users are never allowed to set status to 'system-ingested'.
     - A comment is required for every user-driven status change.
-    - reviewed_by is required when moving to 'approved' or 'rejected'.
+    - reviewed_by is required for EVERY user status change
+      (in_progress, approved, rejected). The person making the
+      change must enter their name. Previous name is not kept.
     """
     # 1. Authenticate first
     _require_admin_password(admin_password)
@@ -407,13 +409,13 @@ def update_review_status(
             "comments is required whenever a user changes the status."
         )
 
-    # 5. Reviewer is required when approving or rejecting
-    if new_status in ("approved", "rejected") and not (reviewed_by and reviewed_by.strip()):
+    # 5. reviewed_by is now required for EVERY user status change
+    reviewed_by = (reviewed_by or "").strip()
+    if not reviewed_by:
         raise MissingReviewerError(
-            "reviewed_by is required when setting status to 'approved' or 'rejected'."
+            "reviewed_by is required for every status change. "
+            "Enter the name of the person making this change."
         )
-
-    reviewed_by = reviewed_by.strip() if reviewed_by else reviewed_by
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -450,7 +452,6 @@ def update_review_status(
         f"Cache document {document_id} status changed to '{new_status}' by {reviewed_by}"
     )
     return _row_to_document(row)
-
 
 def delete_document(document_id: int, admin_password: str) -> None:
     """
