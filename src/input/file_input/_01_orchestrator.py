@@ -30,6 +30,8 @@ from ._03_scanner import (
 )
 from ._04_extractor import extract_content, ExtractionError
 
+from src.database.cache_database.database_handlers._01_cache_repository import ( insert_cache_document, )
+
 logger = logging.getLogger(__name__)      # module-level logger tagged with this file's name
 
 
@@ -123,7 +125,7 @@ def _archive_processed_file(
         return None
 
 
-def process_file(input_source: str, max_size_mb: float = DEFAULT_MAX_UPLOAD_FILE_SIZE_MB) -> Dict[str, Any]:
+def process_file(input_source: str, company_name: str, company_stock_name: str, max_size_mb: float = DEFAULT_MAX_UPLOAD_FILE_SIZE_MB) -> Dict[str, Any]:
     """
     Full pipeline:
     1. Get / download the file
@@ -190,6 +192,22 @@ def process_file(input_source: str, max_size_mb: float = DEFAULT_MAX_UPLOAD_FILE
         archived_path = _archive_processed_file(local_path, extraction_result=extraction_result, error_message=None)
         if archived_path is not None:
             result["local_path"] = archived_path  # file was moved — keep this pointing at where it actually is
+
+        #calling the cache insertion function to insert the document into the cache database
+        original_filename = Path(local_path).name
+        try:
+            new_id = insert_cache_document(
+                company_name = company_name,
+                company_stock_name = company_stock_name,
+                extracted_data = extraction_result,
+                file_path = str(result["local_path"]),
+                original_filename = original_filename,
+            )
+            logger.info(f"Inserted into cache DB with id={new_id}")
+            result["cache_document_id"] = new_id
+        except Exception as e:
+            logger.error(f"Extraction succeeded but cache DB insert failed: {e}")
+            result["cache_insert_error"] = str(e)
         return result
 
     except MalwareDetectedError as e:
@@ -274,7 +292,7 @@ if __name__ == "__main__":
     test_input = "/Users/amritanshudash/Desktop/LedgerMind/data/EX-21.1.pdf"   # ← Change this
 
     try:
-        output = process_file(test_input)
+        output = process_file( test_input, company_name="Apple Hospitality REIT, Inc.", company_stock_name="APLE", )
         print("\n" + "="*60)
         print("✅ PROCESSING SUCCESSFUL")
         print("="*60)

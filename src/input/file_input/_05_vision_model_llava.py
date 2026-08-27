@@ -67,7 +67,7 @@ def _find_project_root() -> Path:
     for parent in current.parents:               # walk upward: this file's folder, then its parent, etc
         if (parent / "vision_models").exists():         # found the folder that holds the model weights
             return parent
-    raise RuntimeError("Could not find project root containing 'models' folder")
+    raise RuntimeError("Could not find project root containing 'vision_models' folder")
 
 
 # ============================================================
@@ -212,7 +212,7 @@ def _model_worker_main(request_q: "mp.Queue", response_q: "mp.Queue") -> None:
     try:
         project_root = _find_project_root()                                      # locate vision_models/ folder
         model_path = project_root / "vision_models" / "llava-v1.6-mistral-7b.Q4_K_M.gguf"  # the main LLM weights
-        mmproj_path = project_root / "models" / "mmproj-model-f16.gguf"             # the vision projector weights
+        mmproj_path = project_root / "vision_models" / "mmproj-model-f16.gguf"             # the vision projector weights
 
         if not model_path.exists():
             raise FileNotFoundError(f"Model file not found: {model_path}")
