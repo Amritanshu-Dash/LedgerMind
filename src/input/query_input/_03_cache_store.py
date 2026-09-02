@@ -13,6 +13,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.database.cache_database.database_handlers._02_query_cache_repository import (
+    QueryCacheError,
+    insert_cache_query,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,31 +75,26 @@ def save_query_to_cache(
     company_name: Optional[str] = None,
     company_stock_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Step we will do for real after the new table exists:
-    1. Insert the query row.
-    2. Get unique_query_id.
-    3. For each file, save it in the file table with that same query id.
-    Today: we do not touch the database. We only show the payload. If this function errors, orchestrator will skip prediction.
-    """
     files = attachments or []
     row = build_query_row(analysis, files)
 
-    logger.info(
-        "Query save stub: intent=%s attachments=%s summary=%s",
-        row["intent"],
-        row["attachment_count"],
-        row["attachment_summary"],
+    query_id = insert_cache_query(
+        original_query=row["original_query"],
+        system_converted_query=row["system_converted_query"],
+        query_sense=row["query_sense"],
+        attachment_count=row["attachment_count"],
+        attachment_summary=row["attachment_summary"],
     )
 
-    # When DB is ready, replace this return with a real insert
-    # and put the new query id in unique_query_id.
+    logger.info("Query saved with unique_query_id=%s", query_id)
+
+    # Files: not inserted here yet. insert_cache_document must take unique_query_id first.
     return {
-        "status": "stub",
-        "message": "Query table not wired yet. Nothing was saved.",
-        "unique_query_id": None,
+        "status": "saved",
+        "unique_query_id": query_id,
         "query_row": row,
         "company_name": company_name,
         "company_stock_name": company_stock_name,
         "files_to_save": files,
+        "files_saved": [],
     }
