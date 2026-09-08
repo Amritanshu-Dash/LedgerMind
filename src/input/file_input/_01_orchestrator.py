@@ -30,7 +30,7 @@ from ._03_scanner import (
 )
 from ._04_extractor import extract_content, ExtractionError
 
-from src.database.cache_database.database_handlers._01_cache_repository import ( insert_cache_document, )
+from src.database.cache_database.database_handlers._01_attachments_cache_repository import ( insert_cache_document, )
 
 logger = logging.getLogger(__name__)      # module-level logger tagged with this file's name
 
@@ -125,7 +125,7 @@ def _archive_processed_file(
         return None
 
 
-def process_file(input_source: str, company_name: str, company_stock_name: str, max_size_mb: float = DEFAULT_MAX_UPLOAD_FILE_SIZE_MB) -> Dict[str, Any]:
+def process_file(input_source: str, company_name: str, company_stock_name: str, unique_query_id: int,max_size_mb: float = DEFAULT_MAX_UPLOAD_FILE_SIZE_MB) -> Dict[str, Any]:
     """
     Full pipeline:
     1. Get / download the file
@@ -202,6 +202,8 @@ def process_file(input_source: str, company_name: str, company_stock_name: str, 
                 extracted_data = extraction_result,
                 file_path = str(result["local_path"]),
                 original_filename = original_filename,
+                unique_query_id=unique_query_id,
+                comments="System extracted and ingested the document data.",
             )
             logger.info(f"Inserted into cache DB with id={new_id}")
             result["cache_document_id"] = new_id

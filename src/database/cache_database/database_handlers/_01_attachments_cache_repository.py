@@ -221,6 +221,8 @@ def insert_cache_document(
     extracted_data: Dict[str, Any],
     file_path: str,
     original_filename: str,
+    unique_query_id: int,
+    comments: str
 ) -> int:
     """
     Inserts a newly extracted document.
@@ -271,6 +273,7 @@ def insert_cache_document(
                 cur.execute(
                     """
                     INSERT INTO cache_data (
+                        unique_query_id,
                         company_name,
                         company_stock_name,
                         extracted_data,
@@ -283,6 +286,7 @@ def insert_cache_document(
                     RETURNING id;
                     """,
                     (
+                        unique_query_id,
                         company_name,
                         company_stock_name,
                         Json(extracted_data),
