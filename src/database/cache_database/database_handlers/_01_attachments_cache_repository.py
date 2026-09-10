@@ -282,7 +282,7 @@ def insert_cache_document(
                         data_review_status,
                         comments
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id;
                     """,
                     (
