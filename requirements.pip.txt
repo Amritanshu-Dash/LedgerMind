@@ -1,0 +1,25 @@
+# LedgerMind Phase 1 — pip packages only
+# Create/use .venv, then: pip install -r requirements.txt
+
+# DB + env
+psycopg[binary]>=3.2
+python-dotenv>=1.0
+
+# Files
+pymupdf>=1.24
+pdfplumber>=0.11
+python-docx>=1.1
+pandas>=2.2
+pillow>=10.4
+beautifulsoup4>=4.12
+html2text>=2024.2
+lxml>=5.2
+
+# Vision (local GGUF)
+# First time on Mac (Metal):
+# CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
+llama-cpp-python>=0.3
+huggingface_hub>=0.24
+
+# SEC test-file downloader
+sec-edgar-downloader>=5.0

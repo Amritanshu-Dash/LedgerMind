@@ -1,0 +1,8 @@
+# LedgerMind — system packages (not pip)
+# From repo root:  brew bundle --file=Brewfile
+#
+# Postgres: you already use EnterpriseDB Postgres 17
+# (/Library/PostgreSQL/17). Do NOT install postgresql@16 from brew
+# unless you know you want a second server.
+
+brew "clamav"
