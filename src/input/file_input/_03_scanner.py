@@ -35,6 +35,7 @@ from dataclasses import dataclass  # lightweight structured result object
 from pathlib import Path      # safe, OS-independent path handling
 from shutil import which      # cheap check for whether clamscan is even on PATH
 from typing import Optional   # type hints so signatures are self-documenting
+from oletools.olevba import VBA_Parser
 
 from ._00_constants import DEFAULT_MAX_UPLOAD_FILE_SIZE_MB, SUPPORTED_FILE_MAGIC_BYTES
 
@@ -58,7 +59,7 @@ VERSION_CHECK_TIMEOUT_SECONDS = 10     # the lightweight "is clamscan alive" che
 CLAMSCAN_CPU_LIMIT_SECONDS = 60
 CLAMSCAN_MEMORY_LIMIT_MB = 1024
 
-# Zip-bomb thresholds (applies to DOCX/XLSX/PPTX, which are ZIP archives).
+# Zip-bomb thresholds (applies to DOCX/XLSX, which are ZIP archives).
 MAX_ZIP_ENTRY_COUNT = 2000             # a normal Office file has dozens, not thousands
 MAX_ZIP_UNCOMPRESSED_TOTAL_MB = 500    # total size after decompression
 MAX_ZIP_COMPRESSION_RATIO = 100        # uncompressed / compressed — bombs are 1000x+
@@ -67,8 +68,8 @@ MAX_ZIP_COMPRESSION_RATIO = 100        # uncompressed / compressed — bombs are
 # These formats get the zip-bomb + macro check (see _check_zip_safety).
 # Local to this file only — nothing else needs to know which extensions
 # happen to be ZIP-based under the hood.
-ZIP_BASED_EXTENSIONS = {".docx", ".xlsx", ".pptx"}
-
+ZIP_BASED_EXTENSIONS = {".docx", ".xlsx"}
+OLE_BASED_EXTENSIONS = {".doc", ".xls"}
 
 # ==============================
 # Custom Exceptions
@@ -133,12 +134,6 @@ def _verify_magic_bytes(path: Path) -> None:
             f"(claims to be one type, is actually something else)."
         )
 
-    # WEBP needs a second check: "RIFF" alone is shared by other formats
-    # (WAV, AVI); the real marker is "WEBP" starting at byte offset 8.
-    if ext == ".webp" and header[8:12] != b"WEBP":
-        raise SuspiciousFileError("File claims to be WEBP but is a different RIFF format.")
-
-
 # ==============================
 # LAYER 2 — Zip-bomb + macro check (DOCX/XLSX/PPTX only)
 # ==============================
@@ -200,6 +195,24 @@ def _check_zip_safety(path: Path) -> None:
         # letting it propagate as a raw, confusing exception.
         raise SuspiciousFileError(f"Could not safely inspect archive contents: {e}")
 
+def _check_ole_safety(path: Path) -> None:
+    """
+    Raises SuspiciousFileError if a legacy OLE-based Office file (.doc/.xls) contains a VBA macro. Same policy as _check_zip_safety() for the newer zip-based formats: we never need macros to read financial data, so any macro is grounds for rejection — known-malicious or not.
+    """
+    vba_parser = None
+    try:
+        vba_parser = VBA_Parser(str(path))
+        if vba_parser.detect_vba_macros():
+            raise SuspiciousFileError(
+                "File contains an embedded macro (VBA), which this pipeline does not accept."
+            )
+    except SuspiciousFileError:
+        raise
+    except Exception as e:
+        raise SuspiciousFileError(f"Could not safely inspect OLE file contents: {e}")
+    finally:
+        if vba_parser is not None:
+            vba_parser.close()
 
 # ==============================
 # LAYER 3 — Active-content check (PDF only)
@@ -382,10 +395,8 @@ def scan_file(
     Args:
         file_path: Absolute path of the file.
         timeout: Max seconds for the ClamAV scan step specifically.
-        max_size_mb: Hard cap on file size. Defaults to DEFAULT_MAX_UPLOAD_FILE_SIZE_MB
-            so there is always a cap even if the caller forgets to pass one.
-        allowed_base_dir: If given, the resolved path must live inside this
-            directory. Strongly recommended — pass your uploads folder.
+        max_size_mb: Hard cap on file size. Defaults to DEFAULT_MAX_UPLOAD_FILE_SIZE_MB so there is always a cap even if the caller forgets to pass one.
+        allowed_base_dir: If given, the resolved path must live inside this directory. Strongly recommended — pass your uploads folder.
 
     Raises:
         FileNotFoundError, ValueError — basic sanity failures.
@@ -420,10 +431,15 @@ def scan_file(
     _verify_magic_bytes(path)
     checks_passed.append("magic_bytes")
 
-    # --- Layer 2: zip-bomb / macro check, only for ZIP-based Office files ---
+    # --- Layer 2a: zip-bomb / macro check, only for ZIP-based Office files ---
     if path.suffix.lower() in ZIP_BASED_EXTENSIONS:
         _check_zip_safety(path)
         checks_passed.append("zip_safety")
+
+    # --- Layer 2b: OLE-based macro check, only for legacy Office files ---
+    if path.suffix.lower() in OLE_BASED_EXTENSIONS:
+        _check_ole_safety(path)
+        checks_passed.append("ole_safety")
 
     # --- Layer 3: active-content check, only for PDFs ---
     if path.suffix.lower() == ".pdf":

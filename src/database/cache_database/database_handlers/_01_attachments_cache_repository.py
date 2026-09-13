@@ -577,6 +577,18 @@ if __name__ == "__main__":
     print("Testing cache_repository.py...")
     print("=" * 60)
 
+    # unique_query_id is a required foreign key into cache_queries now —
+    # create a real query row first rather than guessing an id that may
+    # not exist.
+    from ._02_query_cache_repository import insert_cache_query
+
+    test_query_id = insert_cache_query(
+        original_query="Self-test query for cache_repository.py",
+        system_converted_query="Self-test query for cache_repository.py",
+        query_sense="Self-test — not a real user query.",
+    )
+    print(f"✅ Created test query: unique_query_id={test_query_id}")
+
     new_id = insert_cache_document(
         company_name="Test Company Inc",
         company_stock_name="TEST",
@@ -588,6 +600,8 @@ if __name__ == "__main__":
         },
         file_path="/tmp/test_document.txt",
         original_filename="test_document.txt",
+        unique_query_id=test_query_id,
+        comments="System extracted and ingested the document data.",
     )
     print(f"✅ Inserted test document: {new_id}")
 

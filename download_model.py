@@ -1,32 +1,48 @@
-from huggingface_hub import hf_hub_download,list_repo_files
+"""
+Reads requirements.models.txt and downloads each GGUF with huggingface_hub.
+Skip a file if it is already on disk.
+"""
 from pathlib import Path
 
-# Create models directory
-models_dir = Path(__file__).resolve().parent / "models"
-models_dir.mkdir(exist_ok=True)
+from huggingface_hub import hf_hub_download
 
-repo_id = "cjpais/llava-1.6-mistral-7b-gguf"
-
-files = list_repo_files(repo_id)
-for f in files:
-    if "mmproj" in f:
-        print("📌", f)
+ROOT = Path(__file__).resolve().parent
+LIST_FILE = ROOT / "requirements.models.txt"
 
 
+def parse_list():
+    rows = []
+    for raw in LIST_FILE.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 4:
+            raise ValueError(f"Bad line (need 4 columns): {raw}")
+        job, folder, repo, filename = parts
+        rows.append((job, folder, repo, filename))
+    return rows
 
-files = [
-    "llava-v1.6-mistral-7b.Q4_K_M.gguf",
-    "mmproj-model-f16.gguf"
-]
 
-for filename in files:
-    print(f"Downloading {filename} ...")
-    local_path = hf_hub_download(
-        repo_id=repo_id,
-        filename=filename,
-        local_dir=models_dir,
-        local_dir_use_symlinks=False
-    )
-    print(f"Saved to {local_path}")
+def main():
+    if not LIST_FILE.exists():
+        raise SystemExit(f"Missing {LIST_FILE}")
 
-print("✅ All files downloaded.")
+    for job, folder, repo, filename in parse_list():
+        dest_dir = ROOT / folder
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
+        if dest.exists():
+            print(f"SKIP already have [{job}] {dest}")
+            continue
+        print(f"GET  [{job}] {filename} -> {dest_dir}")
+        hf_hub_download(
+            repo_id=repo,
+            filename=filename,
+            local_dir=str(dest_dir),
+        )
+        print(f"OK   {dest}")
+
+
+if __name__ == "__main__":
+    main()

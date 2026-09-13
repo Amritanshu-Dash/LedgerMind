@@ -6,3 +6,4 @@
 # unless you know you want a second server.
 
 brew "clamav"
+cask "libreoffice"

@@ -53,26 +53,18 @@ DEFAULT_MAX_UPLOAD_FILE_SIZE_MB: Final[float] = 50.0
 # genuinely immutable at runtime, not just named in ALL_CAPS by
 # convention — see the note above.
 SUPPORTED_FILE_MAGIC_BYTES: Final[MappingProxyType] = MappingProxyType({
-    ".pdf": (b"%PDF",),
-    ".png": (b"\x89PNG\r\n\x1a\n",),
-    ".jpg": (b"\xff\xd8\xff",),
-    ".jpeg": (b"\xff\xd8\xff",),
-    ".bmp": (b"BM",),
-    ".webp": (b"RIFF",),  # full check also verifies "WEBP" at offset 8, see scanner.py
+    ".pdf":  (b"%PDF",),
     ".docx": (b"PK\x03\x04",),
+    ".doc":  (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
     ".xlsx": (b"PK\x03\x04",),
-    ".pptx": (b"PK\x03\x04",),
-    ".doc": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
-    ".xls": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
-    ".ppt": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
-    ".txt": (b"",),
-    ".csv": (b"",),
-    ".json": (b"{", b"["),
-    ".xml": (b"<?xml",),
-    "html": (b"<!DOCTYPE html", b"<html"),
-    "htm": (b"<!DOCTYPE html", b"<html"),
-    "md": (b"#",),
+    ".xls":  (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
+    ".txt":  (b"",),
+    ".csv":  (b"",),
+    ".png":  (b"\x89PNG\r\n\x1a\n",),
+    ".jpg":  (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
 })
+
 SUPPORTED_FILE_EXTENSIONS: Final[frozenset] = frozenset(SUPPORTED_FILE_MAGIC_BYTES.keys())
 
 

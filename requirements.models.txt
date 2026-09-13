@@ -1,0 +1,15 @@
+# Weight files only. Not pip. Not brew.
+# Install with: python download_models.py
+#
+# Columns (spaces around | are fine):
+#   job | folder | huggingface_repo | filename
+#
+# job = why we have this file
+# folder = where it lands on disk (do not commit these folders)
+
+# Seeing pages / charts inside PDFs (already used in file input)
+vision | vision_models | cjpais/llava-1.6-mistral-7b-gguf | llava-v1.6-mistral-7b.Q4_K_M.gguf
+vision | vision_models | cjpais/llava-1.6-mistral-7b-gguf | mmproj-model-f16.gguf
+
+# Phase 2 brain — text in, briefing out (M1 16GB pick)
+brain | text_models | unsloth/Qwen3.5-9B-GGUF | Qwen3.5-9B-Q4_K_M.gguf

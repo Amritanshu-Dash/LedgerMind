@@ -23,3 +23,9 @@ huggingface_hub>=0.24
 
 # SEC test-file downloader
 sec-edgar-downloader>=5.0
+
+# Security / malware scanning
+oletools>=0.60
+
+openpyxl>=3.1 
+xlrd>=2.0

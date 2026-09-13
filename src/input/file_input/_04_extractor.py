@@ -16,7 +16,6 @@ Design goals:
    for those at all), but that's not implemented yet.
 4. Match whatever the currently active vision model module actually returns — a structured VisionAnalysisResult (accepted / rejected images), not a plain string.
 """
-
 import io                            # in-memory byte buffers for DOCX embedded images
 import logging                       # structured logging instead of print()
 import tempfile                      # scratch directories for extracted images, auto-cleaned
@@ -26,6 +25,12 @@ from typing import Any, Dict, List, Optional  # type hints so signatures are sel
 import fitz                          # pymupdf — reads PDF text, drawings, and renders pages
 from docx import Document            # reads DOCX paragraphs and embedded images
 from PIL import Image                # decodes embedded image bytes before re-saving to disk
+import pandas as pd 
+
+import shutil
+import subprocess
+import tempfile
+
 
 # ============================================================
 # VISION MODEL SWITCH
@@ -60,13 +65,17 @@ COMPLEX_MAX_AVG_WORDS_PER_LINE = 3    # tables tend to have short, sparse lines 
 COMPLEX_MIN_LINE_COUNT = 5            # need at least this many lines before the short-line signal counts
 PAGE_RENDER_DPI = 200                 # resolution for full-page renders sent to the vision model
 
+_SOFFICE_CANDIDATES = [
+    "soffice",
+    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+]
+
 
 class ExtractionError(Exception):
     """
     Raised when content extraction fails outright (unreadable/corrupt file, unsupported type, etc). NOT raised just because the vision model had trouble with some images — see _run_vision_model for why.
     """
     pass
-
 
 def extract_content(file_path: str) -> Dict[str, Any]:
     """
@@ -93,10 +102,14 @@ def extract_content(file_path: str) -> Dict[str, Any]:
             return _extract_pdf(path)
         elif suffix == ".docx":
             return _extract_docx(path)
-        elif suffix in [".txt", ".md"]:
+        elif suffix == ".doc":
+            return _extract_doc(path)
+        elif suffix in [".txt", ".csv"]:
             return _extract_txt(path)
-        elif suffix in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
+        elif suffix in [".png", ".jpg", ".jpeg"]:
             return _extract_image(path)
+        elif suffix in [".xlsx", ".xls"]:
+            return _extract_excel(path)
         else:
             raise ExtractionError(f"Unsupported file type: {suffix}")
 
@@ -308,6 +321,70 @@ def _extract_docx(path: Path) -> Dict[str, Any]:
         "file_type": "docx",
     }
 
+def _find_soffice() -> Optional[str]:
+    for candidate in _SOFFICE_CANDIDATES:
+        if shutil.which(candidate) or Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _extract_doc(path: Path) -> Dict[str, Any]:
+    """
+    Legacy .doc has no pure-Python reader — python-docx only handles the
+    newer zip-based .docx. Converts via LibreOffice running headless
+    (brew install --cask libreoffice) to plain text, then reads that.
+    """
+    soffice = _find_soffice()
+    if soffice is None:
+        raise ExtractionError(
+            "LibreOffice is not installed. Run: brew install --cask libreoffice"
+        )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        try:
+            result = subprocess.run(
+                [soffice, "--headless", "--convert-to", "txt", "--outdir", tmp_dir, str(path)],
+                capture_output=True, text=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            raise ExtractionError("Timed out converting .doc file.")
+
+        if result.returncode != 0:
+            raise ExtractionError(f"LibreOffice conversion failed: {result.stderr.strip()}")
+
+        converted_path = Path(tmp_dir) / f"{path.stem}.txt"
+        if not converted_path.exists():
+            raise ExtractionError("LibreOffice did not produce output for this .doc file.")
+
+        text = _cap_text_length(converted_path.read_text(encoding="utf-8", errors="ignore").strip())
+
+    return {
+        "text": text, "normal_text": text, "vision_text": "",
+        "images_found": 0, "images_rejected": 0, "rejection_reasons": [],
+        "file_type": "doc",
+    }
+
+def _extract_excel(path: Path) -> Dict[str, Any]:
+    """
+    Reads every sheet of an Excel file (.xlsx via openpyxl, .xls via xlrd — pandas picks the engine automatically from the extension) and turns each sheet into plain text. No vision model needed here — spreadsheet cells are already structured data, not something that needs layout guessing the way a PDF page does.
+    """
+    try:
+        sheets = pd.read_excel(path, sheet_name=None, dtype=str)
+    except Exception as e:
+        raise ExtractionError(f"Could not read spreadsheet: {e}")
+
+    parts = []
+    for sheet_name, df in sheets.items():
+        df = df.fillna("")
+        parts.append(f"--- Sheet: {sheet_name} ---\n{df.to_string(index=False)}")
+
+    text = _cap_text_length("\n\n".join(parts).strip())
+
+    return {
+        "text": text, "normal_text": text, "vision_text": "",
+        "images_found": 0, "images_rejected": 0, "rejection_reasons": [],
+        "file_type": path.suffix.lstrip(".").lower(),  # "xlsx" or "xls"
+    }
 
 def _extract_txt(path: Path) -> Dict[str, Any]:
     # Independent size safety net — see the note in the module docstring about the current mismatch between this and scanner.py's allowed types (worth resolving one way or the other).
@@ -325,7 +402,7 @@ def _extract_txt(path: Path) -> Dict[str, Any]:
         "images_found": 0,
         "images_rejected": 0,
         "rejection_reasons": [],
-        "file_type": "txt",
+        "file_type": path.suffix.lstrip(".").lower(),
     }
 
 

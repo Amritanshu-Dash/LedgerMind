@@ -284,17 +284,31 @@ def process_file(input_source: str, company_name: str, company_stock_name: str, 
 # ==============================
 # Quick Test
 # ==============================
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
 
+    # Same foreign-key requirement as above — needs a real query row.
+    from src.database.cache_database.database_handlers._02_query_cache_repository import insert_cache_query
+    test_query_id = insert_cache_query(
+        original_query="Self-test query for file_input orchestrator.",
+        system_converted_query="Self-test query for file_input orchestrator.",
+        query_sense="Self-test — not a real user query.",
+    )
+
     # Change this path to a real file on your system
     test_input = "/Users/amritanshudash/Desktop/LedgerMind/data/EX-21.1.pdf"   # ← Change this
 
     try:
-        output = process_file( test_input, company_name="Apple Hospitality REIT, Inc.", company_stock_name="APLE", )
+        output = process_file(
+            test_input,
+            company_name="Apple Hospitality REIT, Inc.",
+            company_stock_name="APLE",
+            unique_query_id=test_query_id,
+        )
         print("\n" + "="*60)
         print("✅ PROCESSING SUCCESSFUL")
         print("="*60)
