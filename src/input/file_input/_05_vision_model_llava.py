@@ -27,7 +27,7 @@ Why LLaVA 1.6 + llama-cpp-python?
 import base64            # encodes image bytes into a data URI the model can read directly
 import logging            # structured logging instead of scattered print()s
 import multiprocessing as mp  # runs the model in its own process, so a crash there can't kill the app
-import os                 # used for the forced exit in the quick test at the bottom
+import os                 # used for the forced exit on worker shutdown and in the quick test at the bottom
 import queue               # gives us queue.Empty to detect a worker timeout
 import time                 # only used to time the quick test run
 import traceback           # captures full tracebacks from inside the worker process to report back
@@ -245,7 +245,13 @@ def _model_worker_main(request_q: "mp.Queue", response_q: "mp.Queue") -> None:
             break  # parent process went away
 
         if request_id is None:
-            break  # explicit shutdown
+            # Explicit shutdown. Force-exit immediately instead of returning —
+            # letting this function return would let Python's normal interpreter
+            # teardown run its course, which is exactly what triggers the known
+            # Metal backend GGML_ASSERT crash when it tries to destruct the
+            # Metal-backed model (see the same os._exit(0) workaround in this
+            # file's own __main__ block).
+            os._exit(0)
 
         try:
             result = llm.create_chat_completion(
@@ -453,6 +459,18 @@ def analyze_images(image_paths: List[str]) -> VisionAnalysisResult:
             )
             continue
 
+        # Degenerate model output: not a REJECT line, but nothing usable either.
+        # Treat this the same as a rejection rather than recording a fake success.
+        if not raw_output.strip():
+            result.rejected.append(
+                ImageResult(
+                    image_path=str(path),
+                    accepted=False,
+                    reason="Model returned no extractable content.",
+                )
+            )
+            continue
+
         result.accepted.append(  # image passed both validation and the model's financial-content check
             ImageResult(
                 image_path=str(path),
@@ -484,7 +502,7 @@ if __name__ == "__main__":
 
     # Change this to a folder of test images, or a single path.
     test_images = [
-        "/Users/amritanshudash/Desktop/LedgerMind/PHOTO-2026-02-15-13-14-11.jpg",
+        "/Users/amritanshudash/Desktop/LedgerMind/data/PHOTO-2026-02-15-13-14-11.jpg",
     ]
 
     print("\n" + "=" * 60)
