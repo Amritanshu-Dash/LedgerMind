@@ -29,6 +29,7 @@ import logging            # structured logging instead of scattered print()s
 import multiprocessing as mp  # runs the model in its own process, so a crash there can't kill the app
 import os                 # used for the forced exit on worker shutdown and in the quick test at the bottom
 import queue               # gives us queue.Empty to detect a worker timeout
+import threading            # serializes concurrent run_inference() callers (see _ModelWorkerManager)
 import time                 # only used to time the quick test run
 import traceback           # captures full tracebacks from inside the worker process to report back
 from dataclasses import dataclass, field  # lightweight structured result objects, no boilerplate
@@ -289,6 +290,7 @@ class _ModelWorkerManager:
         self._request_q: Optional[mp.Queue] = None         # parent -> worker: images to process
         self._response_q: Optional[mp.Queue] = None         # worker -> parent: results / errors
         self._next_request_id = 0                             # increasing id so replies can be matched up
+        self._lock = threading.Lock()                          # serializes run_inference() end to end
 
     def _start_worker(self) -> None:
         """Spawn a fresh worker process and wait for it to report ready."""
@@ -333,47 +335,62 @@ class _ModelWorkerManager:
     def run_inference(self, data_uri: str) -> str:
         """
         Runs one image through the model. Raises RuntimeError with a clear message on any failure (timeout, crash, load failure) rather than ever letting an exception from the worker process propagate in a confusing way. Restarts the worker automatically if it died.
+
+        Serialized end to end via self._lock: the worker's request/response
+        queues carry only the response for whatever request is currently
+        in flight, with no id-based routing on the receiving end. Two
+        callers hitting this concurrently could otherwise both put a
+        request on the queue and then race on self._response_q.get() — one
+        of them pulling the OTHER caller's real response off the queue,
+        failing the id check, and discarding a result it should have kept.
+        A plain threading.Lock is correct here (not multiprocessing.Lock):
+        every current and planned caller lives in this same parent
+        process — only the worker itself is a separate process, and it
+        never calls back into this method. This also means worker
+        start/restart can't race between two callers either, since it now
+        happens inside the same locked section.
         """
-        last_error: Optional[str] = None  # keeps the most recent failure reason across retries
+        with self._lock:
+            last_error: Optional[str] = None  # keeps the most recent failure reason across retries
 
-        for attempt in range(MAX_WORKER_RESTARTS_PER_CALL + 1):  # try once, then retry up to the limit
-            try:
-                self._ensure_worker_alive()
-            except Exception as e:
-                last_error = str(e)
-                continue  # try again, up to the restart limit
+            for attempt in range(MAX_WORKER_RESTARTS_PER_CALL + 1):  # try once, then retry up to the limit
+                try:
+                    self._ensure_worker_alive()
+                except Exception as e:
+                    last_error = str(e)
+                    continue  # try again, up to the restart limit
 
-            request_id = self._next_request_id    # unique id for this specific request
-            self._next_request_id += 1
-            self._request_q.put((request_id, data_uri))  # hand the image off to the worker
+                request_id = self._next_request_id    # unique id for this specific request
+                self._next_request_id += 1
+                self._request_q.put((request_id, data_uri))  # hand the image off to the worker
 
-            try:
-                got_id, content, error = self._response_q.get(
-                    timeout=MODEL_INFERENCE_TIMEOUT_SECONDS
-                )
-            except queue.Empty:
-                # The worker hung, or crashed hard enough that it never even put a response on the queue. Kill it and retry fresh.
-                logger.warning("Vision model worker timed out — restarting it.")
-                self._kill_worker()
-                last_error = f"Model inference timed out after {MODEL_INFERENCE_TIMEOUT_SECONDS}s."
-                continue
+                try:
+                    got_id, content, error = self._response_q.get(
+                        timeout=MODEL_INFERENCE_TIMEOUT_SECONDS
+                    )
+                except queue.Empty:
+                    # The worker hung, or crashed hard enough that it never even put a response on the queue. Kill it and retry fresh.
+                    logger.warning("Vision model worker timed out — restarting it.")
+                    self._kill_worker()
+                    last_error = f"Model inference timed out after {MODEL_INFERENCE_TIMEOUT_SECONDS}s."
+                    continue
 
-            if got_id != request_id:
-                # Stale response from a previous attempt; ignore and retry.
-                last_error = "Received mismatched response from vision worker."
-                continue
+                if got_id != request_id:
+                    # Stale response from a previous attempt; ignore and retry.
+                    last_error = "Received mismatched response from vision worker."
+                    continue
 
-            if error is not None:
-                last_error = error
-                # An in-process exception (not a crash) — worker is still
-                # usable, so just report the error, no need to restart it.
-                raise RuntimeError(f"Vision model inference failed: {error}")
+                if error is not None:
+                    last_error = error
+                    # An in-process exception (not a crash) — worker is still
+                    # usable, so just report the error, no need to restart it.
+                    raise RuntimeError(f"Vision model inference failed: {error}")
 
-            return content  # success — hand the extracted text back to the caller
+                return content  # success — hand the extracted text back to the caller
 
-        raise RuntimeError(
-            f"Vision model worker failed after {MAX_WORKER_RESTARTS_PER_CALL + 1} attempts: {last_error}"
-        )
+            raise RuntimeError(
+                f"Vision model worker failed after {MAX_WORKER_RESTARTS_PER_CALL + 1} attempts: {last_error}"
+            )
 
     def shutdown(self) -> None:
         """

@@ -26,6 +26,7 @@ Fail-open vs fail-closed:
 Every exception this module raises means "reject the file." Callers must never catch one of these and let the file through anyway — that would defeat the entire point of having a guardian stage.
 """
 
+import copy                   # shallow-copy a ZipInfo before overriding file_size (see _check_zip_safety)
 import logging               # structured logging instead of print()
 import os                    # used for POSIX-only resource limiting (see _run_signature_scan)
 import re                    # used to search raw PDF bytes for active-content markers
@@ -36,6 +37,8 @@ from pathlib import Path      # safe, OS-independent path handling
 from shutil import which      # cheap check for whether clamscan is even on PATH
 from typing import Optional   # type hints so signatures are self-documenting
 from oletools.olevba import VBA_Parser
+import fitz                    # pymupdf — walks actual PDF objects (see _check_pdf_safety); already a
+                                # dependency, imported the same way in _04_extractor.py
 
 from ._00_constants import DEFAULT_MAX_UPLOAD_FILE_SIZE_MB, SUPPORTED_FILE_MAGIC_BYTES
 
@@ -141,10 +144,26 @@ def _verify_magic_bytes(path: Path) -> None:
 # expand into gigabytes when unzipped downstream, or carry an embedded
 # macro we never need for reading financial data out of a document.
 
+_ZIP_DECOMPRESS_CHUNK_BYTES = 1024 * 1024  # read/count in 1MB steps while decompressing
+
+# Python's zipfile.ZipExtFile initializes its internal read budget
+# (`_left`) directly from `ZipInfo.file_size` — the exact declared field
+# this check exists to stop trusting. Left alone, a crafted entry that
+# lies about a small file_size (with a CRC forged to match the truncated
+# output) would make `.read()` silently stop early and hand back only the
+# lie, never the real decompressed bytes. Opening a copy of the entry with
+# file_size overridden to this sentinel removes that artificial ceiling,
+# so what we read back is bounded only by the entry's real compressed data
+# — which is what we actually want to measure.
+_ZIP_UNBOUNDED_READ_SENTINEL = 2**62
+
+
 def _check_zip_safety(path: Path) -> None:
     """
     Raises SuspiciousFileError on a zip bomb or an embedded macro. Only call this for files in ZIP_BASED_EXTENSIONS.
     """
+    max_total_bytes = MAX_ZIP_UNCOMPRESSED_TOTAL_MB * 1024 * 1024
+
     try:
         with zipfile.ZipFile(path) as zf:
             entries = zf.infolist()
@@ -157,11 +176,12 @@ def _check_zip_safety(path: Path) -> None:
 
             total_uncompressed = 0
             for entry in entries:
-                total_uncompressed += entry.file_size
-
                 # Per-entry compression ratio check — a single wildly
                 # over-compressed entry is the classic zip-bomb signature,
-                # even if the archive-wide total still looks small.
+                # even if the archive-wide total still looks small. Still
+                # against declared metadata: cheap, useful first-pass filter,
+                # left as-is — the real backstop is the actual decompression
+                # below, which doesn't trust these fields.
                 if entry.compress_size > 0:
                     ratio = entry.file_size / entry.compress_size
                     if ratio > MAX_ZIP_COMPRESSION_RATIO:
@@ -179,12 +199,27 @@ def _check_zip_safety(path: Path) -> None:
                         "which this pipeline does not accept."
                     )
 
-            total_uncompressed_mb = total_uncompressed / (1024 * 1024)
-            if total_uncompressed_mb > MAX_ZIP_UNCOMPRESSED_TOTAL_MB:
-                raise SuspiciousFileError(
-                    f"Archive would decompress to {total_uncompressed_mb:.0f}MB, "
-                    f"limit is {MAX_ZIP_UNCOMPRESSED_TOTAL_MB}MB (possible zip bomb)."
-                )
+                # Authoritative size check: actually decompress this entry in
+                # bounded chunks and count real bytes produced, instead of
+                # trusting entry.file_size — a field the archive's own
+                # central directory declares and can lie about. Abort the
+                # instant the running total (across all entries so far)
+                # crosses the limit, so we never fully decompress a file
+                # that's already over budget.
+                unbounded_entry = copy.copy(entry)
+                unbounded_entry.file_size = _ZIP_UNBOUNDED_READ_SENTINEL
+                with zf.open(unbounded_entry) as entry_file:
+                    while True:
+                        chunk = entry_file.read(_ZIP_DECOMPRESS_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        total_uncompressed += len(chunk)
+                        if total_uncompressed > max_total_bytes:
+                            raise SuspiciousFileError(
+                                f"Archive decompresses to more than "
+                                f"{MAX_ZIP_UNCOMPRESSED_TOTAL_MB}MB "
+                                f"(possible zip bomb)."
+                            )
 
     except zipfile.BadZipFile:
         raise SuspiciousFileError("File claims to be an Office document but is not a valid ZIP archive.")
@@ -233,6 +268,14 @@ _PDF_DANGEROUS_MARKERS = [
 def _check_pdf_safety(path: Path) -> None:
     """
     Raises SuspiciousFileError if the PDF contains active-content markers.
+
+    Two passes: a raw-byte regex (cheap, kept for defense in depth) and an
+    object-level walk via pymupdf. The raw-byte pass alone misses markers
+    that live only inside a compressed object stream (common since PDF
+    1.5, since many producers store most of the document's objects that
+    way) — pymupdf decompresses those internally to hand back each
+    object's own representation, so the object-level pass sees content the
+    byte-level one structurally cannot.
     """
     try:
         with open(path, "rb") as f:
@@ -246,6 +289,36 @@ def _check_pdf_safety(path: Path) -> None:
                 f"PDF contains active-content marker '{pattern.decode(errors='ignore')}', "
                 f"which this pipeline does not accept."
             )
+
+    try:
+        pdf_doc = fitz.open(str(path))
+    except Exception as e:
+        raise SuspiciousFileError(f"Could not open PDF for object-level inspection: {e}")
+
+    try:
+        # xref 0 is always the reserved free-list head, never a real
+        # object — real objects start at 1. xref_length() is one past the
+        # highest valid index.
+        for xref in range(1, pdf_doc.xref_length()):
+            try:
+                obj_text = pdf_doc.xref_object(xref)
+            except Exception:
+                # A handful of xref slots are free entries or otherwise not
+                # readable as a plain object (e.g. an object stream's own
+                # container object) — not itself suspicious, just not a
+                # dictionary we can inspect this way. Skip and keep walking.
+                continue
+
+            obj_bytes = obj_text.encode("utf-8", errors="ignore")
+            for pattern in _PDF_DANGEROUS_MARKERS:
+                if re.search(pattern, obj_bytes):
+                    raise SuspiciousFileError(
+                        f"PDF object {xref} contains active-content marker "
+                        f"'{pattern.decode(errors='ignore')}', which this "
+                        f"pipeline does not accept."
+                    )
+    finally:
+        pdf_doc.close()
 
 
 # ==============================
