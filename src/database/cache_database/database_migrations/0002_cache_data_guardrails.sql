@@ -9,6 +9,10 @@
 -- Matches the project rule: a status change without a name attached
 -- should be impossible, not just discouraged.
 -- ============================================================
+
+ALTER TABLE cache_data
+    DROP CONSTRAINT IF EXISTS reviewer_required_when_reviewed;
+
 ALTER TABLE cache_data
     ADD CONSTRAINT reviewer_required_when_reviewed
     CHECK (
@@ -21,6 +25,10 @@ ALTER TABLE cache_data
 -- Closes the gap where main_db_status could be 'requested' on a row
 -- that's still 'pending' or 'rejected'.
 -- ============================================================
+
+ALTER TABLE cache_data
+    DROP CONSTRAINT IF EXISTS main_db_status_only_when_approved;
+
 ALTER TABLE cache_data
     ADD CONSTRAINT main_db_status_only_when_approved
     CHECK (main_db_status IS NULL OR data_review_status = 'approved');
